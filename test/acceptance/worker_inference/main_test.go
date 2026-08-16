@@ -142,6 +142,8 @@ func resolveProfile(raw string) workerpkg.Profile {
 		return workerpkg.ProfileClaudeTmuxCLI
 	case string(workerpkg.ProfileCodexTmuxCLI):
 		return workerpkg.ProfileCodexTmuxCLI
+	case string(workerpkg.ProfileCursorTmuxCLI):
+		return workerpkg.ProfileCursorTmuxCLI
 	case string(workerpkg.ProfileGeminiTmuxCLI):
 		return workerpkg.ProfileGeminiTmuxCLI
 	case string(workerpkg.ProfileKimiTmuxCLI):
@@ -167,6 +169,8 @@ func profileProvider(profile workerpkg.Profile) string {
 		return "claude"
 	case workerpkg.ProfileCodexTmuxCLI:
 		return "codex"
+	case workerpkg.ProfileCursorTmuxCLI:
+		return "cursor"
 	case workerpkg.ProfileGeminiTmuxCLI:
 		return "gemini"
 	case workerpkg.ProfileKimiTmuxCLI:
@@ -190,6 +194,8 @@ func profileExecutable(profile workerpkg.Profile, provider string) string {
 	switch profile {
 	case workerpkg.ProfileAntigravityTmuxCLI:
 		return "agy"
+	case workerpkg.ProfileCursorTmuxCLI:
+		return "cursor-agent"
 	case workerpkg.ProfileMimoCodeTmuxCLI:
 		return "mimo"
 	case workerpkg.ProfileZCodeTmuxCLI:
@@ -206,6 +212,8 @@ func profileSearchPaths(gcHome string, profile workerpkg.Profile) []string {
 	switch profile {
 	case workerpkg.ProfileCodexTmuxCLI:
 		return []string{filepath.Join(gcHome, ".codex", "sessions")}
+	case workerpkg.ProfileCursorTmuxCLI:
+		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "cursor-transcripts")}
 	case workerpkg.ProfileGeminiTmuxCLI:
 		return []string{filepath.Join(gcHome, ".gemini", "tmp")}
 	case workerpkg.ProfileKimiTmuxCLI:
@@ -231,6 +239,8 @@ func stageProviderAuth(gcHome string, env *helpers.Env, profile workerpkg.Profil
 		return stageClaudeAuth(gcHome, env)
 	case workerpkg.ProfileCodexTmuxCLI:
 		return stageCodexAuth(gcHome, env)
+	case workerpkg.ProfileCursorTmuxCLI:
+		return stageCursorAuth(gcHome, env)
 	case workerpkg.ProfileGeminiTmuxCLI:
 		return stageGeminiAuth(gcHome, env)
 	case workerpkg.ProfileKimiTmuxCLI:
@@ -248,6 +258,30 @@ func stageProviderAuth(gcHome string, env *helpers.Env, profile workerpkg.Profil
 	default:
 		return "", fmt.Errorf("unsupported worker-inference profile %q", profile)
 	}
+}
+
+func stageCursorAuth(gcHome string, env *helpers.Env) (string, error) {
+	transcriptDir := filepath.Join(gcHome, ".local", "share", "gascity", "cursor-transcripts")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		return "", err
+	}
+
+	stagedKey, keyFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_CURSOR_API_KEY",
+		"GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("cursor auth unavailable: %w", err)
+	}
+	if apiKey := strings.TrimSpace(stagedKey); apiKey != "" {
+		env.With("CURSOR_API_KEY", apiKey)
+		return stagedSecretSource("cursor", keyFromFile), nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("CURSOR_API_KEY")); apiKey != "" {
+		env.With("CURSOR_API_KEY", apiKey)
+		return "env:CURSOR_API_KEY", nil
+	}
+	return "", fmt.Errorf("cursor auth unavailable: set CURSOR_API_KEY or GC_WORKER_INFERENCE_CURSOR_API_KEY")
 }
 
 func stageAntigravityAuth(gcHome string, env *helpers.Env) (string, error) {
