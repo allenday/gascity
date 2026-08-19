@@ -8,6 +8,10 @@ import (
 	"text/template"
 )
 
+// The encode/decode pair below is the source of truth for the qualified-identity
+// separator encoding shared with beads; see
+// docs/reference/specs/identity-separator-contract-v1.md for the written
+// contract (which repo mints vs. compares, and why -- and __ must never collapse).
 var sessionNameQualifiedReplacer = strings.NewReplacer(
 	"/", "--",
 	".", "__",
