@@ -275,6 +275,32 @@ exit 0
 	}
 }
 
+// writeSyncFakeDoltCLIPushFailsForDB installs a fake dolt for CLI-mode tests
+// that fails `dolt push` only for the named database and succeeds for every
+// other one. CLI mode runs `dolt push` with cwd set to the per-database
+// directory (`cd "$d" && dolt push ...`), so the failing db is selected by
+// $PWD's basename rather than by argv.
+func writeSyncFakeDoltCLIPushFailsForDB(t *testing.T, dir, badDB string, exitCode int) {
+	t.Helper()
+	logPath := filepath.Join(dir, "dolt.log")
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "` + logPath + `"
+case "$*" in
+  *"push "*)
+    if [ "$(basename "$PWD")" = "` + badDB + `" ]; then
+      printf 'remote rejected push\n' >&2
+      exit ` + strconv.Itoa(exitCode) + `
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+}
+
 // writeSyncFakeDoltPushEchoesArgs installs a fake dolt that, on the SQL-mode
 // DOLT_PUSH call, reports whether DOLT_CLI_PASSWORD was delivered via the
 // environment and echoes its own full argv to stderr (mimicking a dolt that
@@ -1656,5 +1682,67 @@ func TestSyncCLIForcePushReportsExitCode(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "ERROR: push failed (exit 5)") {
 		t.Fatalf("expected CLI --force exit-code-5 failure message, got:\n%s", out)
+	}
+}
+
+// TestSyncSummaryNamesFailedDatabaseAmongHealthyOnes covers the sync command's
+// exit-code/output contract when only one database among several fails to
+// push: the sticky aggregate `exit_code` used to carry no record of which
+// database(s) failed or why, so a caller (or an OrderFailed event built from
+// this output) could misread "some databases failed" as "every database
+// failed". The final line must name the failing database and reason, and
+// must not claim every database failed.
+func TestSyncSummaryNamesFailedDatabaseAmongHealthyOnes(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	for _, name := range []string{"good1", "bad", "good2"} {
+		dbDir := filepath.Join(dataDir, name)
+		if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir db %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
+			t.Fatalf("write remotes for %s: %v", name, err)
+		}
+	}
+
+	binDir := t.TempDir()
+	writeSyncFakeDoltCLIPushFailsForDB(t, binDir, "bad", 1)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script)
+	cmd.Env = append(syncFilteredEnv(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		"GC_DOLT_PORT=1",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit when one of three databases fails to push, output:\n%s", out)
+	}
+	output := string(out)
+
+	if !strings.Contains(output, "good1: pushed") || !strings.Contains(output, "good2: pushed") {
+		t.Fatalf("expected both healthy databases to still push, got:\n%s", output)
+	}
+	if !strings.Contains(output, "bad: ERROR: push failed") {
+		t.Fatalf("expected the failing database's own error line, got:\n%s", output)
+	}
+
+	if !strings.Contains(output, "sync: 1/3 database(s) failed") {
+		t.Fatalf("expected a summary line naming exactly 1/3 failures, got:\n%s", output)
+	}
+	if !strings.Contains(output, "bad (push failed (exit 1))") {
+		t.Fatalf("expected the summary to name the failing database and reason, got:\n%s", output)
+	}
+	if strings.Contains(output, "3/3 database(s) failed") {
+		t.Fatalf("summary must not read as if every database failed, got:\n%s", output)
 	}
 }
