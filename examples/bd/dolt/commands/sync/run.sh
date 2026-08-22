@@ -651,11 +651,9 @@ if [ -d "$data_dir" ]; then
   done
 fi
 
-# D2: the loop above uses a sticky aggregate exit_code with no record of which
-# database(s) failed or why, which reads to a caller/agent as if ALL databases
-# failed even when only one did. Name the actual failures explicitly, as the
-# last line emitted (it must survive tailForOrderFailureEvent's truncation
-# window in cmd/gc/order_dispatch.go when this runs under an order).
+# Positioned as the last line of output: an OrderFailed event built from this
+# script's output (tailForOrderFailureEvent, cmd/gc/order_dispatch.go) keeps
+# only a bounded tail, so this summary must survive that truncation window.
 if [ "$exit_code" -ne 0 ]; then
   echo "sync: $fail_count/$total_count database(s) failed: $failed_summary" >&2
 fi
