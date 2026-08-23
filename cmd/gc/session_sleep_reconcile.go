@@ -215,10 +215,20 @@ func reconcileExactSessionSleepDrain(
 		ProcessNames:         drainAckStopPendingProcessNames(params.Config, info),
 		IncarnationStartedAt: drainAckIncarnationStartedAt(info),
 	})
-	if !liveness.Complete {
-		return yieldOrPark(errors.New("exact sleep drain liveness observation is incomplete"))
-	}
+	// Scan completeness proves ABSENCE; a positive observation is decisive on
+	// its own. This family's candidate is definitionally ALIVE — a live pane
+	// withholds the very tmux-absence license (TmuxSessionProvenAbsent) that
+	// would let the /proc sweep clear post-incarnation strangers — so gating
+	// the positive path on Complete wedged every idle wake-suppressed session
+	// on a busy host permanently (ga-i20db field follow-up: tr-j82xw,
+	// su-h9kaad, or-b24cs, pl-65t6r). The begin a positive observation
+	// licenses is enqueue-only; the terminal stop stays behind its own
+	// fresh-death proof in the advance.
 	if !liveness.Running && !liveness.Alive {
+		if !liveness.Complete {
+			// Dead cannot be told apart from unobserved. Fail closed.
+			return yieldOrPark(errors.New("exact sleep drain liveness observation is incomplete"))
+		}
 		// Nothing to drain. A durably-awake row with a dead runtime is D-ORPHAN's
 		// condition and the pool-slot free's, not this family's.
 		recordExactSessionSleepDrainTrace(params, admission, info, reason, TraceOutcomeSkipped, 0, false, nil)

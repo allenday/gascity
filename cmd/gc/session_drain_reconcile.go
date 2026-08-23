@@ -129,14 +129,22 @@ func reconcileExactSessionDrainAdvance(
 		ProcessNames:         drainAckStopPendingProcessNames(params.Config, info),
 		IncarnationStartedAt: drainAckIncarnationStartedAt(info),
 	})
-	if !liveness.Complete {
-		// Absence is not proven. The fleet scan treats an unreadable probe as
-		// "exited" and completes the drain; a keyed completion writes asleep onto
-		// a row whose agent may still be working, so this refuses instead. The
-		// condition is level-triggered and re-detected next sweep.
-		return yieldOrPark(errors.New("exact drain advance liveness observation is incomplete"))
-	}
+	// Scan completeness proves ABSENCE; a positive observation is decisive on
+	// its own. A draining session's pane is usually still alive, and a live
+	// pane withholds the tmux-absence license that would complete the /proc
+	// sweep — an unconditional Complete gate therefore parked the advance
+	// before it could even send its deferred drain signal (ga-i20db field
+	// follow-up). Only the dead-completion below writes asleep, and it (like
+	// the timeout stop's confirm) demands a COMPLETE proven-dead observation.
 	if !liveness.Running && !liveness.Alive {
+		if !liveness.Complete {
+			// Absence is not proven. The fleet scan treats an unreadable probe as
+			// "exited" and completes the drain; a keyed completion writes asleep
+			// onto a row whose agent may still be working, so this refuses
+			// instead. The condition is level-triggered and re-detected next
+			// sweep.
+			return yieldOrPark(errors.New("exact drain advance liveness observation is incomplete"))
+		}
 		latest, ok := rereadExactSessionDrainRow(params, info, response, name)
 		if !ok {
 			return exactSessionStartKeyedOwner, nil

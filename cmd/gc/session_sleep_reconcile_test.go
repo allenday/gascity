@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -695,4 +696,113 @@ func TestExactSleepDrainAdmissionIsOwnedAndYielded(t *testing.T) {
 		t.Fatal("ownsDuplicateNamedRetire() answered true for a sleep-drain admission")
 	}
 	awaitCond(t, func() bool { return !controller.ownsSleepDrain(bead.ID) }, "sleep-drain admission drain")
+}
+
+// aliveIncompleteObservationProvider reproduces the wedged-fleet shape from
+// the mc-enterprise6i soak (ga-i20db follow-up): the target session's pane is
+// ALIVE — which is exactly why it is a sleep-drain candidate — so the
+// tmux-absence license (TmuxSessionProvenAbsent = cacheComplete &&
+// !panePresent) is definitionally unavailable, the /proc sweep cannot clear
+// post-incarnation strangers, and the observation reports positive liveness
+// with Complete=false on every sweep, forever.
+type aliveIncompleteObservationProvider struct {
+	*runtime.Fake
+	observed int
+}
+
+func (p *aliveIncompleteObservationProvider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
+	p.observed++
+	running := p.IsRunning(target.SessionName)
+	return runtime.Liveness{Running: running, Alive: running, Complete: false}
+}
+
+func (p *aliveIncompleteObservationProvider) StopUnattendedSession(name, _ string) error {
+	return p.Stop(name)
+}
+
+// TestExactSleepDrainAliveSessionProceedsOnIncompleteScan is the field wedge
+// (tr-j82xw / su-h9kaad / or-b24cs / pl-65t6r, 2026-08-23): an alive, idle,
+// wake-suppressed session whose liveness observation is POSITIVE but
+// incomplete. Scan completeness exists to prove ABSENCE; a positive
+// observation is decisive on its own, and the drain begin it licenses is
+// enqueue-only (the interrupt stays with the advance, the terminal stop stays
+// behind its own fresh-death proof). Parking here wedged the four sessions
+// permanently, because a live pane withholds the very license that would
+// complete the scan.
+func TestExactSleepDrainAliveSessionProceedsOnIncompleteScan(t *testing.T) {
+	const name = "worker"
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep: config.SessionSleepConfig{InteractiveResume: "60s"},
+		Workspace:    config.Workspace{Name: "test-city"},
+		Agents:       []config.Agent{{Name: name, StartCommand: "true"}},
+	}
+	provider := &aliveIncompleteObservationProvider{Fake: env.sp}
+	if err := provider.Start(t.Context(), name, runtime.Config{}); err != nil {
+		t.Fatalf("start runtime for %q: %v", name, err)
+	}
+	bead := env.createSessionBead(name, name)
+	env.markSessionActive(&bead)
+	env.setSessionMetadata(&bead, map[string]string{
+		"detached_at": env.clk.Now().UTC().Add(-6 * time.Minute).Format(time.RFC3339),
+	})
+	env.sp.WaitForIdleErrors[name] = nil
+
+	info, response, err := getAuthoritativeSessionStartPersistedRecord(env.store, bead.ID)
+	if err != nil {
+		t.Fatalf("authoritative read: %v", err)
+	}
+	params := newExactSleepDrainParams(env, provider, name)
+
+	handled, owner, err := reconcileExactSessionDetectorFamily(
+		t.Context(), sleepDrainAdmission(bead.ID), params, info, response, env.clk)
+	if !handled {
+		t.Fatal("the D-SLEEP seam did not claim a live no-wake row")
+	}
+	if err != nil {
+		t.Fatalf("an alive session's incomplete scan parked the drain begin: %v", err)
+	}
+	if owner != exactSessionStartKeyedOwner {
+		t.Fatalf("owner = %v, want keyed ownership", owner)
+	}
+	if provider.observed == 0 {
+		t.Fatal("the handler never observed liveness; the test proves nothing")
+	}
+	waitForIdleProbeReady(t, env.dt, bead.ID)
+
+	handled, _, err = reconcileExactSessionDetectorFamily(
+		t.Context(), sleepDrainAdmission(bead.ID), params, info, response, env.clk)
+	if !handled || err != nil {
+		t.Fatalf("drain leg: handled=%v err=%v", handled, err)
+	}
+	if env.dt.get(bead.ID) == nil {
+		t.Fatal("no drain intent recorded; the positive observation must license the enqueue-only begin")
+	}
+}
+
+// TestExactSleepDrainDeadIncompleteObservationStillParks is the fail-closed
+// control for the test above: when the observation is NEGATIVE and incomplete,
+// dead cannot be told apart from unobserved, so the handler must still refuse.
+func TestExactSleepDrainDeadIncompleteObservationStillParks(t *testing.T) {
+	env := newReconcilerTestEnv()
+	provider, bead := seedIdleSuppressedSession(t, env)
+	provider.incomplete = true
+
+	info, response, err := getAuthoritativeSessionStartPersistedRecord(env.store, bead.ID)
+	if err != nil {
+		t.Fatalf("authoritative read: %v", err)
+	}
+	params := newExactSleepDrainParams(env, provider, "worker")
+
+	handled, _, err := reconcileExactSessionDetectorFamily(
+		t.Context(), sleepDrainAdmission(bead.ID), params, info, response, env.clk)
+	if !handled {
+		t.Fatal("the D-SLEEP seam did not claim the row")
+	}
+	if err == nil || !strings.Contains(err.Error(), "liveness observation is incomplete") {
+		t.Fatalf("err = %v, want the incomplete-liveness park for a negative unproven observation", err)
+	}
+	if env.dt.get(bead.ID) != nil {
+		t.Fatal("an unproven observation recorded drain intent")
+	}
 }
