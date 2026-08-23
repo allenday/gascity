@@ -962,6 +962,7 @@ func TestSessionStartControllerBlockedWorkersKeepDistinctCensusQueueBounded(t *t
 			presentGeneration,
 			nil,
 			false,
+			"",
 		)
 		if err != nil {
 			t.Fatalf("admit census key %d: %v", i, err)

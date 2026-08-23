@@ -401,3 +401,148 @@ func TestObserveSessionStartReconcileEmitsNamedEscalationOnceAtThreshold(t *test
 		t.Fatalf("pre-threshold retrying line = %q, want the existing per-refusal diagnostic", got)
 	}
 }
+
+// TestObserveSessionStartReconcileReleaseLineReportsCycleAndTotal pins the
+// release line's shape (ga-c9m4g): the primary number is the released cycle's
+// own refusal count — bounded, so soak tooling reading "after N" plateaus —
+// with the obligation's designed cumulative total alongside.
+func TestObserveSessionStartReconcileReleaseLineReportsCycleAndTotal(t *testing.T) {
+	var buf bytes.Buffer
+	cr := &CityRuntime{stderr: &buf}
+	cr.observeSessionStartReconcile(nil, rollout.Require, sessionStartReconcileResult{
+		Admission:             sessionStartAdmission{SessionID: "gc-drain-rel", PoolDrainAckUncertain: true},
+		Outcome:               sessionStartReconcileDeadlineExceeded,
+		Err:                   errSessionStartPoolDrainAckPending,
+		DrainAckRefusals:      213,
+		DrainAckCycleRefusals: 17,
+	})
+	line := buf.String()
+	if !strings.Contains(line, "released gc-drain-rel at the drain deadline after 17 consecutive refusals this deadline cycle (obligation total 213)") {
+		t.Fatalf("release line = %q, want the cycle count primary and the obligation total alongside", line)
+	}
+}
+
+// TestSessionStartControllerUncertainDrainAckStreakScopesByRowToken is
+// ga-c9m4g: the 22 field climbers ("released <ID> at the drain deadline after
+// N consecutive refusals", N 41 -> 275 monotonic) are stop-pending rows whose
+// acknowledgement lease is NOT reconstructable, so every one of their
+// admissions is PoolDrainAckUncertain — token-less — and the InstanceToken
+// scoping of 96fba19543 never reached them. The seed reads the row to build
+// the uncertain retention, so it knows the row's instance token; the streak
+// must scope by it exactly as it scopes by the lease's token: an uncertain
+// re-seed of the SAME incarnation continues the count across the deadline
+// release, and an uncertain seed of a NEW incarnation starts at one.
+func TestSessionStartControllerUncertainDrainAckStreakScopesByRowToken(t *testing.T) {
+	controller, err := newSessionStartController(sessionStartControllerOptions{
+		Workers: 1, MaxDistinct: 4, MaxRetries: 2,
+		Reconcile: func(context.Context, sessionStartAdmission) error { return nil },
+		Now:       func() time.Time { return time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC) },
+		Stderr:    &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("new controller: %v", err)
+	}
+	// Accept admissions without Start: workers would resolve each admission
+	// (deleting the streak) before the direct bound checks below could
+	// observe it deterministically.
+	controller.mu.Lock()
+	controller.accepting = true
+	controller.mu.Unlock()
+	const key = "gc-c9m4g"
+
+	admitUncertain := func(token string) sessionStartAdmission {
+		t.Helper()
+		outcome, admission, admitErr := controller.admit(
+			key, sessionStartAdmissionAntiEntropy, false, 0,
+			nil, nil, true, token, nil, nil, nil, nil)
+		if admitErr != nil {
+			t.Fatalf("admit uncertain drain ack: %v", admitErr)
+		}
+		if outcome != sessionStartAdmissionAccepted && outcome != sessionStartAdmissionCoalesced {
+			t.Fatalf("admit outcome = %v", outcome)
+		}
+		if admission.PoolDrainAckUncertainToken != token {
+			t.Fatalf("admission uncertain token = %q, want %q carried from the seed's row read", admission.PoolDrainAckUncertainToken, token)
+		}
+		return admission
+	}
+
+	first := admitUncertain("tok-incarnation-1")
+	var refusals int
+	for i := 0; i < 5; i++ {
+		_, refusals, _, _ = controller.boundRetainedDrainAck(key, first.Version)
+	}
+	if refusals != 5 {
+		t.Fatalf("first obligation's refusals = %d, want 5", refusals)
+	}
+
+	// The deadline release: admission deleted, streak retained by design.
+	controller.releaseAdmission(key, first.Version)
+
+	// Same incarnation re-seeded uncertain: the SAME obligation continues.
+	same := admitUncertain("tok-incarnation-1")
+	if _, refusals, _, _ = controller.boundRetainedDrainAck(key, same.Version); refusals != 6 {
+		t.Fatalf("same-obligation refusals after release = %d, want 6: the release must not reset the obligation's history", refusals)
+	}
+	controller.releaseAdmission(key, same.Version)
+
+	// A NEW incarnation's drain, still lease-less: a genuinely new obligation.
+	next := admitUncertain("tok-incarnation-2")
+	if _, refusals, _, _ = controller.boundRetainedDrainAck(key, next.Version); refusals != 1 {
+		t.Fatalf("new obligation's first refusal count = %d, want 1: the previous incarnation's streak must not leak through the token-less uncertain path", refusals)
+	}
+}
+
+// TestSessionStartControllerDrainDeadlineReleaseReportsCycleRefusals pins the
+// release line's number (ga-c9m4g's observable): the release is a per-cycle
+// event bounded by the drain's own deadline, so it reports the refusals of the
+// cycle it releases — a bounded number that plateaus for soak tooling — while
+// the obligation's designed cumulative streak stays available on the result.
+func TestSessionStartControllerDrainDeadlineReleaseReportsCycleRefusals(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	controller, err := newSessionStartController(sessionStartControllerOptions{
+		Workers: 1, MaxDistinct: 4, MaxRetries: 2,
+		Reconcile: func(context.Context, sessionStartAdmission) error { return nil },
+		Now:       func() time.Time { return now },
+		Stderr:    &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("new controller: %v", err)
+	}
+	controller.mu.Lock()
+	controller.accepting = true
+	controller.mu.Unlock()
+	const key = "gc-c9m4g-cycle"
+	_, admission, admitErr := controller.admit(
+		key, sessionStartAdmissionAntiEntropy, false, 0,
+		nil, nil, true, "tok-cycle", nil, nil, nil, nil)
+	if admitErr != nil {
+		t.Fatalf("admit uncertain drain ack: %v", admitErr)
+	}
+
+	var cycle, refusals int
+	for i := 0; i < 4; i++ {
+		_, refusals, cycle, _ = controller.boundRetainedDrainAck(key, admission.Version)
+	}
+	if refusals != 4 || cycle != 4 {
+		t.Fatalf("first cycle: refusals=%d cycle=%d, want 4 and 4", refusals, cycle)
+	}
+
+	// Macro cycle: release, re-seed the same obligation, refuse twice more.
+	controller.releaseAdmission(key, admission.Version)
+	_, again, admitErr := controller.admit(
+		key, sessionStartAdmissionAntiEntropy, false, 0,
+		nil, nil, true, "tok-cycle", nil, nil, nil, nil)
+	if admitErr != nil {
+		t.Fatalf("re-admit uncertain drain ack: %v", admitErr)
+	}
+	for i := 0; i < 2; i++ {
+		_, refusals, cycle, _ = controller.boundRetainedDrainAck(key, again.Version)
+	}
+	if refusals != 6 {
+		t.Fatalf("obligation total after second cycle = %d, want 6", refusals)
+	}
+	if cycle != 2 {
+		t.Fatalf("second cycle's refusals = %d, want 2: the release reports its own cycle, not the obligation's lifetime", cycle)
+	}
+}

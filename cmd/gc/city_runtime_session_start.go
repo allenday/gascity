@@ -418,8 +418,12 @@ func (cr *CityRuntime) observeSessionStartReconcile(cfg *config.City, mode rollo
 		cr.recordDrainAckAdmissionBoundTrace(cfg, result, TraceOutcomeEscalated)
 	}
 	if result.Outcome == sessionStartReconcileDeadlineExceeded {
-		fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start drain-ack reconciliation released %s at the drain deadline after %d consecutive refusals: %v; authoritative audit requested\n", //nolint:errcheck // the release must be visible: legacy re-owns the row from here
-			cr.sessionStartLogPrefix(), result.Admission.SessionID, result.DrainAckRefusals, result.Err)
+		// The release is a per-cycle event: its number is the refusals of the
+		// deadline cycle it releases, bounded by one cycle's re-examinations,
+		// with the obligation's designed cumulative streak alongside
+		// (ga-c9m4g — the lifetime count alone read as an unbounded climb).
+		fmt.Fprintf(cr.sessionStartStderr(), "%s: session-start drain-ack reconciliation released %s at the drain deadline after %d consecutive refusals this deadline cycle (obligation total %d): %v; authoritative audit requested\n", //nolint:errcheck // the release must be visible: legacy re-owns the row from here
+			cr.sessionStartLogPrefix(), result.Admission.SessionID, result.DrainAckCycleRefusals, result.DrainAckRefusals, result.Err)
 		cr.recordDrainAckAdmissionBoundTrace(cfg, result, TraceOutcomeDeadlineExceeded)
 		if mode == rollout.Auto {
 			cr.requestLegacySessionStartFallback()
@@ -499,8 +503,9 @@ func (cr *CityRuntime) seedSessionStartController(controller *sessionStartContro
 				lease, agentDrainAck, legacyMarker, leaseErr := cr.recoverRoutedWorkPoolDrainAckLease(stateSnapshot, info)
 				if leaseErr != nil {
 					return sessionStartAuthoritativeSeedResult{
-						SessionID:             info.ID,
-						PoolDrainAckUncertain: true,
+						SessionID:                  info.ID,
+						PoolDrainAckUncertain:      true,
+						PoolDrainAckUncertainToken: strings.TrimSpace(info.InstanceToken),
 					}
 				}
 				if !agentDrainAck && legacyMarker {
@@ -509,7 +514,11 @@ func (cr *CityRuntime) seedSessionStartController(controller *sessionStartContro
 					continue
 				}
 				if !agentDrainAck {
-					return sessionStartAuthoritativeSeedResult{SessionID: info.ID, PoolDrainAckUncertain: true}
+					return sessionStartAuthoritativeSeedResult{
+						SessionID:                  info.ID,
+						PoolDrainAckUncertain:      true,
+						PoolDrainAckUncertainToken: strings.TrimSpace(info.InstanceToken),
+					}
 				}
 				return sessionStartAuthoritativeSeedResult{SessionID: info.ID, PoolDrainAck: &lease}
 			}
