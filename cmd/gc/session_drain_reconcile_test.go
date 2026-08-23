@@ -853,3 +853,55 @@ func TestExactDrainAdvanceRefusesWhenLivenessIsIncomplete(t *testing.T) {
 		t.Fatal("an unproven absence completed the drain")
 	}
 }
+
+// TestExactDrainAdvanceAliveSessionProceedsOnIncompleteScan is the second half
+// of the field wedge TestExactSleepDrainAliveSessionProceedsOnIncompleteScan
+// pins on D-SLEEP: once a drain begins against an ALIVE session, the advance
+// must be able to send its deferred drain signal even though the live pane
+// withholds the tmux-absence license and keeps the /proc sweep incomplete.
+// Scan completeness proves absence; every destructive arm downstream (the
+// dead-completion above, the timeout stop's confirm) re-proves absence behind
+// its own COMPLETE observation, so a positive observation is decisive here.
+func TestExactDrainAdvanceAliveSessionProceedsOnIncompleteScan(t *testing.T) {
+	const name = exactDrainAdvanceTestSessionName
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: name, StartCommand: "true"}},
+	}
+	provider := &aliveIncompleteObservationProvider{Fake: env.sp}
+	if err := provider.Start(t.Context(), name, runtime.Config{}); err != nil {
+		t.Fatalf("start runtime for %q: %v", name, err)
+	}
+	bead := env.createSessionBead(name, name)
+	env.markSessionActive(&bead)
+	now := env.clk.Now()
+	env.dt.set(bead.ID, &drainState{
+		startedAt:  now.Add(-10 * time.Second),
+		deadline:   now.Add(defaultDrainTimeout),
+		reason:     "idle",
+		generation: 1,
+	})
+	params := newExactDrainAdvanceParams(env, provider)
+
+	handled, _, err := dispatchExactDrainAdvance(t, env, params, bead.ID)
+	if !handled {
+		t.Fatal("the D-DRAIN seam did not claim a row carrying drain intent")
+	}
+	if err != nil {
+		t.Fatalf("an alive session's incomplete scan parked the drain advance: %v", err)
+	}
+	if ack, _ := provider.GetMeta(name, "GC_DRAIN_ACK"); ack != "1" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want the deferred drain signal sent on the first advance past a positive observation", ack)
+	}
+	if env.dt.get(bead.ID) == nil {
+		t.Fatal("the advance retired the drain intent; only completion or cancel may")
+	}
+	stored, err := env.store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Metadata["state"] == "asleep" {
+		t.Fatal("a positive observation completed the drain; completion needs a proven-dead COMPLETE observation")
+	}
+}
