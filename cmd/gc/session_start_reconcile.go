@@ -434,9 +434,18 @@ func commitExactSessionResetHandoff(
 		ProcessNames:         processNames,
 		IncarnationStartedAt: incarnationStartedAt,
 	})
-	if !liveness.Complete {
-		return info, initialResponse, errors.New("exact reset session liveness observation is incomplete")
-	}
+	// Scan completeness proves ABSENCE; a positive observation is decisive on its
+	// own. The recycle's stop is destructive BY INTENT — a reset exists to kill
+	// the live incarnation so the restart runs a fresh conversation — and a live
+	// pane withholds the tmux-absence license (TmuxSessionProvenAbsent) the /proc
+	// sweep needs, so gating it on Complete meant no busy-host reset ever
+	// recycled anything (ga-bxa8r).
+	//
+	// The negative arm below keeps the demand, and this is the arm where
+	// completeness genuinely earns it: skipping the stop on an UNPROVEN absence
+	// would commit the restart handoff while the old incarnation may still be
+	// alive, and the start that follows would put a second incarnation on the
+	// same name.
 	if liveness.Running || liveness.Alive {
 		latest, latestResponse, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, info.ID)
 		if readErr != nil {
@@ -455,6 +464,8 @@ func commitExactSessionResetHandoff(
 			return info, initialResponse, fmt.Errorf("confirming exact reset session %q stopped: %v", info.ID, completion)
 		}
 		recordExactOrdinaryResetStopTrace(params, info, time.Since(stopStartedAt))
+	} else if !liveness.Complete {
+		return info, initialResponse, errors.New("exact reset session liveness observation is incomplete")
 	}
 	if exactOrdinaryResetCommitted(info) {
 		return info, initialResponse, nil
@@ -1995,10 +2006,23 @@ func reconcileExactSessionStartWithOwner(
 			ProcessNames:         processNames,
 			IncarnationStartedAt: incarnationStartedAt,
 		})
-		if !liveness.Complete {
-			return yieldOrPark(errors.New("exact suspended session liveness observation is incomplete"))
-		}
+		// Scan completeness proves ABSENCE; a positive observation is decisive on
+		// its own. Like D-DEADLINE's, this stop is destructive BY INTENT — the
+		// user asked for it and the runtime is stopped precisely because it is
+		// still live — so gating it on Complete demanded a proof a live target
+		// can never supply: a live pane withholds the tmux-absence license
+		// (TmuxSessionProvenAbsent) the /proc sweep needs, and on a busy host
+		// `gc session suspend` left the runtime up with the admission consumed
+		// (ga-bxa8r). Identity is fenced by the revision + instance-token + name
+		// re-read below, the token-bound stop, and the COMPLETE proven-dead
+		// confirm — which is satisfiable, because absence licenses the scan.
 		if !liveness.Running && !liveness.Alive {
+			if !liveness.Complete {
+				// Dead cannot be told apart from unobserved, and the silent no-op
+				// below would consume the admission and retire a suspend the row
+				// still owes. Fail closed; the condition is level-triggered.
+				return yieldOrPark(errors.New("exact suspended session liveness observation is incomplete"))
+			}
 			return exactSessionStartKeyedOwner, nil
 		}
 		latest, latestResponse, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, info.ID)

@@ -149,12 +149,14 @@ func reconcileExactSessionOrphanClose(
 		ProcessNames:         processNames,
 		IncarnationStartedAt: drainAckIncarnationStartedAt(latest),
 	})
-	if !liveness.Complete {
-		// Absence is not proven. Refuse with zero effect rather than close a bead
-		// whose runtime may still be alive behind a transient provider blip
-		// (#3872-family); the condition is level-triggered and re-detected.
-		return yieldOrPark(errors.New("exact orphan close liveness observation is incomplete"))
-	}
+	// Scan completeness proves ABSENCE; a positive observation is decisive on its
+	// own. The positive arm below is not a no-op — it is the hand-off that gets a
+	// live undesired session drained — and a live pane withholds the very
+	// tmux-absence license (TmuxSessionProvenAbsent) the /proc sweep needs, so an
+	// unconditional Complete gate parked every live undesired row above its own
+	// hand-off, forever, on any busy host (ga-bxa8r). The destructive close keeps
+	// its proof obligation: it is reachable only from the negative arm, which
+	// still demands a COMPLETE observation.
 	if liveness.Running || liveness.Alive {
 		// A live undesired row is the DRAIN arm's (WD.4). It is handed over from
 		// INSIDE this observation rather than released for a second admission:
@@ -168,6 +170,13 @@ func reconcileExactSessionOrphanClose(
 		}
 		recordExactSessionOrphanCloseTrace(params, admission, latest, site, reason, TraceOutcomeKeptOpen, 0, false)
 		return exactSessionStartKeyedOwner, nil
+	}
+	if !liveness.Complete {
+		// Absence is not proven, and the close below is the destructive step.
+		// Refuse with zero effect rather than close a bead whose runtime may still
+		// be alive behind a transient provider blip (#3872-family); the condition
+		// is level-triggered and re-detected.
+		return yieldOrPark(errors.New("exact orphan close liveness observation is incomplete"))
 	}
 
 	if ctx != nil && ctx.Err() != nil {

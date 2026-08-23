@@ -143,3 +143,33 @@ func TestKeyedPassRefusesTheAliasHealWhenLivenessIsUnproven(t *testing.T) {
 		t.Fatalf("state = %q, want the stored alias retained when liveness is unproven", state)
 	}
 }
+
+// TestKeyedPassHealsTheAliasOnAnAliveIncompleteObservation is ga-bxa8r's last
+// arm. The heal's premise is positive liveness — the planner is asked what a
+// LIVE row owes — so it never infers absence and scan completeness proved
+// nothing for it. Demanding it anyway meant the alias could only ever be
+// normalized on a host quiet enough to license an alive target's sweep, which is
+// no host running agents: a live pane withholds the very tmux-absence license
+// the /proc scan needs.
+//
+// The heal stays what it was: projection-neutral, revision-fenced, and reachable
+// only from a POSITIVE observation. TestKeyedPassLeavesADeadRowsAliasToLegacy
+// and TestKeyedPassRefusesTheAliasHealWhenLivenessIsUnproven above are the
+// untouched controls that keep every non-positive observation out.
+func TestKeyedPassHealsTheAliasOnAnAliveIncompleteObservation(t *testing.T) {
+	env := newReconcilerTestEnv()
+	provider, id := seedWakeDemandedDrainingSession(t, env)
+	params := wakeDemandedDrainParams(t, env, provider)
+	provider.unlicensableAlive = true
+	if !provider.IsRunning(exactDrainAdvanceTestSessionName) {
+		t.Fatal("the fixture's runtime is not alive, so nothing here proves the positive arm was withheld")
+	}
+
+	owner, err := reconcileExactSessionStartWithOwner(t.Context(), drainAdvanceAdmission(id), params)
+	if err != nil || owner != exactSessionStartKeyedOwner {
+		t.Fatalf("keyed pass owner/err = %d/%v, want keyed ownership and no error", owner, err)
+	}
+	if state := readSessionInfoForTest(t, env, id).MetadataState; state != string(sessionpkg.StateAwake) {
+		t.Fatalf("state = %q, want %q: a positive observation licenses the alias heal", state, sessionpkg.StateAwake)
+	}
+}
