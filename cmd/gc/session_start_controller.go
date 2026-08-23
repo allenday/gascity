@@ -117,10 +117,18 @@ type sessionStartAdmission struct {
 	// anti-entropy seed cannot reconstruct its agent acknowledgement lease.
 	// It is a retry fence, never destructive-stop authority.
 	PoolDrainAckUncertain bool
-	PoolStartEntered      bool
-	CensusGeneration      uint64
-	Culled                bool
-	AdmittedAt            time.Time
+	// PoolDrainAckUncertainToken is the ROW's instance token, read by the
+	// seed when it built the uncertain retention. The lease is not
+	// reconstructable for these rows, so without this the refusal streak has
+	// no obligation identity at all and a fresh incarnation's drain would
+	// inherit its predecessor's count through the token-less uncertain path
+	// (ga-c9m4g — the field's 22 unbounded release climbers were exactly this
+	// class). It scopes the streak only; it grants nothing.
+	PoolDrainAckUncertainToken string
+	PoolStartEntered           bool
+	CensusGeneration           uint64
+	Culled                     bool
+	AdmittedAt                 time.Time
 	// DrainAckDeadline bounds the retained drain-ack re-queue below. A drain-ack
 	// is a durable obligation that must never be dropped, so it is deliberately
 	// NOT bounded by maxRetries — but while it is parked the keyed controller
@@ -130,6 +138,13 @@ type sessionStartAdmission struct {
 	// (ga-f7v2ft.112 ruling 1b): stamped when the obligation is first retained,
 	// carried across coalescing so a re-admission storm cannot roll it forward.
 	DrainAckDeadline time.Time
+	// DrainAckCycleStartRefusals is the obligation's streak count at the
+	// moment DrainAckDeadline was stamped — the start of this deadline cycle.
+	// The deadline release reports its own cycle's refusals from it
+	// (ga-c9m4g), so the release line stays a bounded per-cycle number instead
+	// of re-printing the obligation's lifetime climb. Carried across
+	// coalescing exactly like the deadline it anchors to.
+	DrainAckCycleStartRefusals int
 	// DrainAckRefusals mirrors the OBLIGATION-scoped consecutive-refusal count
 	// (sessionStartController.drainAckRefusalHistory) at the last bound check.
 	// Repeated (false, nil) authorization refusals are indistinguishable from
@@ -186,6 +201,12 @@ type sessionStartReconcileResult struct {
 	// result, carried out so the runtime's observer can emit the throttled
 	// diagnostic without the controller learning how to trace.
 	DrainAckRefusals int
+	// DrainAckCycleRefusals is the consecutive-refusal count accumulated
+	// within the current deadline cycle (since the retained obligation's
+	// deadline was stamped). The deadline-release line reports it so its
+	// number is bounded by one cycle's re-examinations; the obligation's
+	// cumulative count stays in DrainAckRefusals (ga-c9m4g).
+	DrainAckCycleRefusals int
 	// DrainAckEscalationCrossing marks the single bound check on which this
 	// obligation's consecutive-refusal count first crossed
 	// drainAckRefusalEscalationThreshold. The crossing is OBLIGATION-scoped
@@ -200,8 +221,13 @@ type sessionStartAuthoritativeSeedResult struct {
 	SessionID             string
 	PoolDrainAck          *routedWorkPoolDrainAckLease
 	PoolDrainAckUncertain bool
-	Complete              bool
-	Err                   error
+	// PoolDrainAckUncertainToken carries the row's instance token alongside an
+	// uncertain retention, read from the same row the seed judged
+	// stop-pending. It scopes the obligation's refusal streak (ga-c9m4g); it
+	// grants no stop authority.
+	PoolDrainAckUncertainToken string
+	Complete                   bool
+	Err                        error
 }
 
 type sessionStartControllerOptions struct {
@@ -332,7 +358,7 @@ func (c *sessionStartController) Admit(id string, source sessionStartAdmissionSo
 		return "", err
 	}
 
-	outcome, _, err := c.admit(id, source, false, 0, nil, nil, false, nil, nil, nil, nil)
+	outcome, _, err := c.admit(id, source, false, 0, nil, nil, false, "", nil, nil, nil, nil)
 	return outcome, err
 }
 
@@ -343,7 +369,7 @@ func (c *sessionStartController) AdmitPoolAllocation(lease routedWorkPoolStartLe
 	if err := validateRoutedWorkPoolStartLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, &lease, nil, false, nil, nil, nil, nil)
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, &lease, nil, false, "", nil, nil, nil, nil)
 	return outcome, err
 }
 
@@ -356,7 +382,7 @@ func (c *sessionStartController) AdmitPoolDrainAck(lease routedWorkPoolDrainAckL
 	if err := validateRoutedWorkPoolDrainAckLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, nil, &lease, false, nil, nil, nil, nil)
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionInProcess, false, 0, nil, &lease, false, "", nil, nil, nil, nil)
 	return outcome, err
 }
 
@@ -371,7 +397,7 @@ func (c *sessionStartController) AdmitWaitDependency(lease sessionWaitDependency
 	if err := validateSessionWaitDependencyStartLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionWaitDependency, false, 0, nil, nil, false, &lease, nil, nil, nil)
+	outcome, _, err := c.admit(lease.SessionID, sessionStartAdmissionWaitDependency, false, 0, nil, nil, false, "", &lease, nil, nil, nil)
 	return outcome, err
 }
 
@@ -387,7 +413,7 @@ func (c *sessionStartController) AdmitConfiguredDependency(lease configuredDepen
 	if err := validateConfiguredDependencyStartLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, source, false, 0, nil, nil, false, nil, &lease, nil, nil)
+	outcome, _, err := c.admit(lease.SessionID, source, false, 0, nil, nil, false, "", nil, &lease, nil, nil)
 	return outcome, err
 }
 
@@ -398,7 +424,7 @@ func (c *sessionStartController) AdmitStrictDefaultPoolWake(lease strictDefaultP
 	if err := validateStrictDefaultPoolWakeStartLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, source, false, 0, nil, nil, false, nil, nil, &lease, nil)
+	outcome, _, err := c.admit(lease.SessionID, source, false, 0, nil, nil, false, "", nil, nil, &lease, nil)
 	return outcome, err
 }
 
@@ -409,7 +435,7 @@ func (c *sessionStartController) AdmitConfiguredNamedWake(lease configuredNamedW
 	if err := validateConfiguredNamedWakeStartLease(lease); err != nil {
 		return "", err
 	}
-	outcome, _, err := c.admit(lease.SessionID, source, false, 0, nil, nil, false, nil, nil, nil, &lease)
+	outcome, _, err := c.admit(lease.SessionID, source, false, 0, nil, nil, false, "", nil, nil, nil, &lease)
 	return outcome, err
 }
 
@@ -447,11 +473,11 @@ func sessionStartAdmissionIsDemand(source sessionStartAdmissionSource) bool {
 	return source == sessionStartAdmissionInProcess || source == sessionStartAdmissionSocket
 }
 
-func (c *sessionStartController) admitAuthoritative(id string, censusGeneration uint64, poolDrainAck *routedWorkPoolDrainAckLease, poolDrainAckUncertain bool) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
-	return c.admit(id, sessionStartAdmissionAntiEntropy, true, censusGeneration, nil, poolDrainAck, poolDrainAckUncertain, nil, nil, nil, nil)
+func (c *sessionStartController) admitAuthoritative(id string, censusGeneration uint64, poolDrainAck *routedWorkPoolDrainAckLease, poolDrainAckUncertain bool, poolDrainAckUncertainToken string) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
+	return c.admit(id, sessionStartAdmissionAntiEntropy, true, censusGeneration, nil, poolDrainAck, poolDrainAckUncertain, poolDrainAckUncertainToken, nil, nil, nil, nil)
 }
 
-func (c *sessionStartController) admit(id string, source sessionStartAdmissionSource, authoritative bool, censusGeneration uint64, poolAllocation *routedWorkPoolStartLease, poolDrainAck *routedWorkPoolDrainAckLease, poolDrainAckUncertain bool, waitDependency *sessionWaitDependencyStartLease, configuredDependency *configuredDependencyStartLease, strictDefaultPoolWake *strictDefaultPoolWakeStartLease, configuredNamedWake *configuredNamedWakeStartLease) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
+func (c *sessionStartController) admit(id string, source sessionStartAdmissionSource, authoritative bool, censusGeneration uint64, poolAllocation *routedWorkPoolStartLease, poolDrainAck *routedWorkPoolDrainAckLease, poolDrainAckUncertain bool, poolDrainAckUncertainToken string, waitDependency *sessionWaitDependencyStartLease, configuredDependency *configuredDependencyStartLease, strictDefaultPoolWake *strictDefaultPoolWakeStartLease, configuredNamedWake *configuredNamedWakeStartLease) (sessionStartAdmissionOutcome, sessionStartAdmission, error) {
 	if err := validateSessionStartAdmission(id, source); err != nil {
 		return "", sessionStartAdmission{}, err
 	}
@@ -542,7 +568,10 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 	}
 	if poolDrainAck == nil && existed {
 		poolDrainAck = previous.PoolDrainAck
-		poolDrainAckUncertain = previous.PoolDrainAckUncertain
+		if !poolDrainAckUncertain {
+			poolDrainAckUncertain = previous.PoolDrainAckUncertain
+			poolDrainAckUncertainToken = previous.PoolDrainAckUncertainToken
+		}
 	}
 	if poolDrainAck != nil {
 		copied := *poolDrainAck
@@ -603,10 +632,13 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 	// The drain-ack bound survives coalescing; its refusal counter does not. A
 	// new version is a new admission for the escalation's purposes, but the
 	// obligation's deadline belongs to the DRAIN, not to whichever hint most
-	// recently landed on the key.
+	// recently landed on the key. The cycle-start count anchors to the same
+	// deadline, so it rides with it.
 	drainAckDeadline := time.Time{}
+	drainAckCycleStartRefusals := 0
 	if existed {
 		drainAckDeadline = previous.DrainAckDeadline
+		drainAckCycleStartRefusals = previous.DrainAckCycleStartRefusals
 	}
 	admission := sessionStartAdmission{
 		SessionID:                    id,
@@ -615,6 +647,7 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 		PoolAllocation:               poolAllocation,
 		PoolDrainAck:                 poolDrainAck,
 		PoolDrainAckUncertain:        poolDrainAckUncertain,
+		PoolDrainAckUncertainToken:   poolDrainAckUncertainToken,
 		WaitDependency:               waitDependency,
 		ConfiguredDependency:         configuredDependency,
 		ConfiguredDependencyEntered:  configuredDependencyEntered,
@@ -625,6 +658,7 @@ func (c *sessionStartController) admit(id string, source sessionStartAdmissionSo
 		PoolStartEntered:             poolStartEntered,
 		AdmittedAt:                   admittedAt,
 		DrainAckDeadline:             drainAckDeadline,
+		DrainAckCycleStartRefusals:   drainAckCycleStartRefusals,
 	}
 	if authoritative && admission.Source == sessionStartAdmissionAntiEntropy {
 		admission.CensusGeneration = censusGeneration
@@ -689,6 +723,7 @@ func (c *sessionStartController) runAuthoritativeSeed(generation uint64, next fu
 	pendingID := ""
 	var pendingDrainAck *routedWorkPoolDrainAckLease
 	pendingDrainAckUncertain := false
+	pendingDrainAckUncertainToken := ""
 	for {
 		if err := c.ctx.Err(); err != nil || !c.seedGenerationCurrent(generation) {
 			return
@@ -714,8 +749,9 @@ func (c *sessionStartController) runAuthoritativeSeed(generation uint64, next fu
 			pendingID = result.SessionID
 			pendingDrainAck = result.PoolDrainAck
 			pendingDrainAckUncertain = result.PoolDrainAckUncertain
+			pendingDrainAckUncertainToken = result.PoolDrainAckUncertainToken
 		}
-		outcome, _, err := c.admitAuthoritative(pendingID, generation, pendingDrainAck, pendingDrainAckUncertain)
+		outcome, _, err := c.admitAuthoritative(pendingID, generation, pendingDrainAck, pendingDrainAckUncertain, pendingDrainAckUncertainToken)
 		if err != nil {
 			c.failAuthoritativeSeed(generation)
 			return
@@ -725,6 +761,7 @@ func (c *sessionStartController) runAuthoritativeSeed(generation uint64, next fu
 			pendingID = ""
 			pendingDrainAck = nil
 			pendingDrainAckUncertain = false
+			pendingDrainAckUncertainToken = ""
 		case sessionStartAdmissionOverflow:
 			if !c.waitForSeedCapacity() {
 				return
@@ -1417,8 +1454,9 @@ func (c *sessionStartController) reconcileKey(key string) {
 	// re-detection re-owns the row instead of being fenced out of it forever
 	// (ga-f7v2ft.112 ruling 1b).
 	if admission.PoolDrainAck != nil || admission.PoolDrainAckUncertain || errors.Is(err, errSessionStartPoolDrainAckPending) {
-		expired, refusals, crossing := c.boundRetainedDrainAck(key, admission.Version)
+		expired, refusals, cycleRefusals, crossing := c.boundRetainedDrainAck(key, admission.Version)
 		result.DrainAckRefusals = refusals
+		result.DrainAckCycleRefusals = cycleRefusals
 		result.DrainAckEscalationCrossing = crossing
 		if expired {
 			c.queue.Forget(key)
@@ -1518,29 +1556,40 @@ type drainAckRefusalStreak struct {
 // release, so the release → audit → re-detect macro cycle cannot reset the
 // escalation bound for the same obligation — while a re-admission carrying a
 // different instance token starts a genuinely new obligation's streak at one.
-// It reports whether the obligation has outlived its deadline bound, the
-// streak's count, and whether this check is the streak's single escalation
-// crossing.
-func (c *sessionStartController) boundRetainedDrainAck(key string, version uint64) (bool, int, bool) {
+// The obligation identity comes from the acknowledgement lease when one was
+// reconstructable, else from the row token the seed stamped on its uncertain
+// retention (ga-c9m4g: the lease-less class was otherwise unscopable). It
+// reports whether the obligation has outlived its deadline bound, the streak's
+// count, the count within the current deadline cycle, and whether this check
+// is the streak's single escalation crossing.
+func (c *sessionStartController) boundRetainedDrainAck(key string, version uint64) (bool, int, int, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	current, ok := c.admissions[key]
 	if !ok || current.Version != version {
-		return false, 0, false
-	}
-	if current.DrainAckDeadline.IsZero() {
-		current.DrainAckDeadline = c.now().Add(drainAckAdmissionBudget)
+		return false, 0, 0, false
 	}
 	token := ""
 	if current.PoolDrainAck != nil {
 		token = current.PoolDrainAck.InstanceToken
 	}
+	if token == "" {
+		token = current.PoolDrainAckUncertainToken
+	}
 	streak := c.drainAckRefusalHistory[key]
 	if token != "" && streak.InstanceToken != "" && streak.InstanceToken != token {
 		streak = drainAckRefusalStreak{}
+		// The inherited deadline (and its cycle anchor) belonged to the
+		// previous obligation; a new obligation runs its own drain clock.
+		current.DrainAckDeadline = time.Time{}
+		current.DrainAckCycleStartRefusals = 0
 	}
 	if token != "" && streak.InstanceToken == "" {
 		streak.InstanceToken = token
+	}
+	if current.DrainAckDeadline.IsZero() {
+		current.DrainAckDeadline = c.now().Add(drainAckAdmissionBudget)
+		current.DrainAckCycleStartRefusals = streak.Count
 	}
 	streak.Count++
 	crossing := !streak.EscalationLogged && streak.Count >= drainAckRefusalEscalationThreshold
@@ -1550,7 +1599,8 @@ func (c *sessionStartController) boundRetainedDrainAck(key string, version uint6
 	c.drainAckRefusalHistory[key] = streak
 	current.DrainAckRefusals = streak.Count
 	c.admissions[key] = current
-	return !c.now().Before(current.DrainAckDeadline), streak.Count, crossing
+	cycleRefusals := streak.Count - current.DrainAckCycleStartRefusals
+	return !c.now().Before(current.DrainAckDeadline), streak.Count, cycleRefusals, crossing
 }
 
 func (c *sessionStartController) readAdmission(key string) (sessionStartAdmission, bool) {
