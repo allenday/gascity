@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -441,6 +442,92 @@ func TestExactStrandedRepairRefusesWhenTheRuntimeIsStillUp(t *testing.T) {
 	stored, _ := env.store.Get(bead.ID)
 	if stored.Status == "closed" {
 		t.Fatal("the handler closed a slot whose runtime is still up")
+	}
+}
+
+// seedStrandedLiveRuntimeUnderIncompleteScan is the ga-bxa8r fixture: the
+// slow-member shape only the handler can catch (an asleep row whose runtime is
+// still up), observed through a provider whose alive-target completeness is
+// structurally unlicensable.
+func seedStrandedLiveRuntimeUnderIncompleteScan(
+	t *testing.T,
+	env *reconcilerTestEnv,
+) (*aliveIncompleteStopProvider, beads.Bead, beads.Bead, exactSessionStartParams) {
+	t.Helper()
+	env.cfg = strandedTestConfig()
+	provider := &aliveIncompleteStopProvider{unattendedStopProvider: &unattendedStopProvider{Fake: env.sp}}
+	bead, work := seedStrandedPoolSlot(t, env, strandedRepairConfirmGrace+time.Minute,
+		map[string]string{beadmeta.RoutedToMetadataKey: strandedTestTemplate})
+	if err := provider.Start(t.Context(), strandedTestTemplate, runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	return provider, bead, work, strandedHandlerParams(env, provider)
+}
+
+// TestExactStrandedRepairKeepsLiveMemberOpenOnIncompleteScan is ga-bxa8r's
+// D-STRANDED specimen, and the 4714a8a00d shape exactly: the POSITIVE arm here
+// is the non-destructive keep-open refusal that protects a slow worker's claim,
+// while the destructive repair lives on the negative arm. A live member
+// withholds the tmux-absence license, so the unconditional Complete gate parked
+// this row instead of recording its refusal — and under daemon.session_reconciler
+// = auto that park is a permanent legacy-fallback treadmill on exactly the rows
+// the keyed arm exists to protect.
+//
+// A positive observation is decisive: the member is running, its claim stays,
+// and no repair is even considered.
+func TestExactStrandedRepairKeepsLiveMemberOpenOnIncompleteScan(t *testing.T) {
+	env := newReconcilerTestEnv()
+	_, bead, work, params := seedStrandedLiveRuntimeUnderIncompleteScan(t, env)
+	info, response := strandedAuthoritative(t, env, bead.ID)
+	if !exactSessionStrandedRepairCandidate(params, info, response, env.clk) {
+		t.Fatal("the durable rungs must all pass here; otherwise this test never reaches the liveness rung")
+	}
+
+	before := detectorStoreFingerprint(t, env.store)
+	if _, err := reconcileExactSessionStrandedRepair(context.Background(),
+		sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionStrandedRepair},
+		params, info, response, env.clk); err != nil {
+		t.Fatalf("a live member's incomplete scan parked the stranded refusal: %v", err)
+	}
+	if after := detectorStoreFingerprint(t, env.store); after != before {
+		t.Fatal("the keep-open refusal wrote to the store")
+	}
+	gotWork, _ := env.store.Get(work.ID)
+	if gotWork.Status != "in_progress" || gotWork.Assignee != bead.ID {
+		t.Fatalf("a running member's work must stay claimed, got status=%q assignee=%q", gotWork.Status, gotWork.Assignee)
+	}
+	if stored, _ := env.store.Get(bead.ID); stored.Status == "closed" {
+		t.Fatal("the handler closed a slot whose runtime is still up")
+	}
+}
+
+// TestExactStrandedRepairUnprovenAbsenceStillParks is the fail-closed control,
+// and it fails DIFFERENTLY: the same fixture with the runtime gone and the scan
+// still unlicensable. Here the destructive repair IS the next step, dead cannot
+// be told apart from unobserved, and the handler must refuse rather than clear a
+// claim a live member may still hold behind an unreadable probe.
+func TestExactStrandedRepairUnprovenAbsenceStillParks(t *testing.T) {
+	env := newReconcilerTestEnv()
+	provider, bead, work, params := seedStrandedLiveRuntimeUnderIncompleteScan(t, env)
+	provider.alwaysIncomplete = true
+	if err := provider.Stop(strandedTestTemplate); err != nil {
+		t.Fatalf("stop runtime: %v", err)
+	}
+	info, response := strandedAuthoritative(t, env, bead.ID)
+
+	before := detectorStoreFingerprint(t, env.store)
+	_, err := reconcileExactSessionStrandedRepair(context.Background(),
+		sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionStrandedRepair},
+		params, info, response, env.clk)
+	if err == nil || !strings.Contains(err.Error(), "liveness observation is incomplete") {
+		t.Fatalf("err = %v, want the incomplete-liveness park for a negative unproven observation", err)
+	}
+	if after := detectorStoreFingerprint(t, env.store); after != before {
+		t.Fatal("an unproven absence repaired the slot")
+	}
+	gotWork, _ := env.store.Get(work.ID)
+	if gotWork.Status != "in_progress" || gotWork.Assignee != bead.ID {
+		t.Fatalf("an unproven absence released the work, got status=%q assignee=%q", gotWork.Status, gotWork.Assignee)
 	}
 }
 

@@ -1319,6 +1319,101 @@ func TestExactResetHandoffCommitsWhenNothingRacesIt(t *testing.T) {
 	}
 }
 
+// seedResetRowUnderIncompleteScan is the ga-bxa8r fixture for the reset arm: the
+// ordinary reset row, observed through a provider whose alive-target
+// completeness is structurally unlicensable.
+func seedResetRowUnderIncompleteScan(
+	t *testing.T,
+	env *reconcilerTestEnv,
+) (*aliveIncompleteStopProvider, beads.Bead, exactSessionStartParams, TemplateParams) {
+	t.Helper()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	provider := &aliveIncompleteStopProvider{unattendedStopProvider: &unattendedStopProvider{Fake: env.sp}}
+	bead := resetSessionFixture(t, env, provider.unattendedStopProvider)
+	params := exactSessionStartTestParams(t, env)
+	params.Provider = provider
+	params.Generation = 1
+	params.RolloutMode = rollout.Require
+	tp, err := resolveExactSessionStartTemplate(params, env.sessionInfo(bead.ID), &env.cfg.Agents[0], env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("resolve reset template: %v", err)
+	}
+	return provider, bead, params, tp
+}
+
+// TestExactResetHandoffRecyclesAliveSessionOnIncompleteScan is ga-bxa8r's reset
+// specimen. The recycle's stop is destructive BY INTENT — a reset exists to kill
+// the live incarnation so the restart runs a fresh conversation — so demanding
+// scan completeness before it asked for a proof a live target can never supply,
+// and on a busy host `gc session reset` never recycled anything.
+//
+// The negative arm keeps the demand, and this is the arm where completeness
+// genuinely earns it: skipping the stop on an UNPROVEN absence would commit the
+// restart handoff while the old incarnation may still be alive, and the start
+// that follows would put a second incarnation on the same name.
+func TestExactResetHandoffRecyclesAliveSessionOnIncompleteScan(t *testing.T) {
+	env := newReconcilerTestEnv()
+	provider, bead, params, tp := seedResetRowUnderIncompleteScan(t, env)
+	name := env.sessionInfo(bead.ID).SessionNameMetadata
+	if !provider.IsRunning(name) {
+		t.Fatal("the fixture's runtime is not alive, so nothing here proves the alive arm was withheld")
+	}
+	info, initial, err := getAuthoritativeSessionStartPersistedRecord(env.store, bead.ID)
+	if err != nil {
+		t.Fatalf("read reset row: %v", err)
+	}
+
+	committed, _, err := commitExactOrdinaryResetHandoff(params, info, initial, tp, env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("an alive session's incomplete scan parked the reset recycle: %v", err)
+	}
+	if provider.IsRunning(name) {
+		t.Fatal("the reset committed without killing the live incarnation")
+	}
+	if calls := provider.stopSnapshot(); len(calls) != 1 || calls[0].expectedToken != "reset-token" {
+		t.Fatalf("unattended stop calls = %#v, want exactly one token-bound stop", calls)
+	}
+	if !exactOrdinaryResetCommitted(committed) {
+		t.Fatalf("committed row = %+v, want the requested marker consumed and the handoff durable", committed)
+	}
+}
+
+// TestExactResetHandoffUnprovenAbsenceStillRefuses is the fail-closed control,
+// and it fails DIFFERENTLY: same fixture with the runtime gone and the scan
+// still unlicensable. Dead cannot be told apart from unobserved, and here that
+// distinction is load-bearing — the handoff below the observation is what
+// licenses a fresh incarnation — so the reset must refuse with the reset markers
+// retained for the next admission rather than commit beside a runtime it never
+// proved gone.
+func TestExactResetHandoffUnprovenAbsenceStillRefuses(t *testing.T) {
+	env := newReconcilerTestEnv()
+	provider, bead, params, tp := seedResetRowUnderIncompleteScan(t, env)
+	provider.alwaysIncomplete = true
+	name := env.sessionInfo(bead.ID).SessionNameMetadata
+	if err := provider.Stop(name); err != nil {
+		t.Fatalf("stop fixture runtime: %v", err)
+	}
+	info, initial, err := getAuthoritativeSessionStartPersistedRecord(env.store, bead.ID)
+	if err != nil {
+		t.Fatalf("read reset row: %v", err)
+	}
+
+	_, _, err = commitExactOrdinaryResetHandoff(params, info, initial, tp, env.clk, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "liveness observation is incomplete") {
+		t.Fatalf("err = %v, want the incomplete-liveness refusal for a negative unproven observation", err)
+	}
+	after := env.sessionInfo(bead.ID)
+	if after.ResetCommittedAt != "" {
+		t.Fatalf("reset_committed_at = %q, want no handoff committed behind an unproven absence", after.ResetCommittedAt)
+	}
+	if after.RestartRequested != "true" || after.ContinuationResetPending != "true" {
+		t.Fatalf("durable reset intent = %+v, want the requested marker pair retained for the next admission", after)
+	}
+}
+
 // killedPinnedOnDemandFixture persists the durable shape gc session kill leaves
 // behind on a live pinned on-demand configured named session: asleep with a
 // killed reason, the pin retained, and no synthesized wake request.

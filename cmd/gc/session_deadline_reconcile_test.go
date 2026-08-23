@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -868,4 +869,147 @@ func TestKeyedDeadlineSkipWakePassIsStructural(t *testing.T) {
 			t.Fatal("the sleep family never drains this fixture, so the two legs above withhold nothing")
 		}
 	})
+}
+
+// aliveIncompleteStopProvider reproduces the tmux provider's structural
+// asymmetry (internal/runtime/tmux/state_cache.go ObserveFreshLiveness):
+// Complete = cacheComplete && scanComplete, and scanComplete can only clear
+// unreadable strangers on a busy host once the tmux-absence license
+// (TmuxSessionProvenAbsent = cacheComplete && !panePresent) is granted. A LIVE
+// target holds a pane, so it withholds that license and its observation is
+// positive-but-INCOMPLETE on every sweep, forever. The moment the pane is gone
+// the license is granted and the very same probe returns a COMPLETE proven-dead
+// observation — which is exactly what this family's post-stop confirm demands.
+//
+// alwaysIncomplete withholds the license even on absence, which is the
+// fail-closed control's shape: a NEGATIVE observation that proves nothing.
+type aliveIncompleteStopProvider struct {
+	*unattendedStopProvider
+	alwaysIncomplete bool
+}
+
+func (p *aliveIncompleteStopProvider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
+	running := p.IsRunning(target.SessionName)
+	return runtime.Liveness{Running: running, Alive: running, Complete: !running && !p.alwaysIncomplete}
+}
+
+// seedAliveIncompleteMaxAgeRow seeds the specimen ga-bxa8r asked for: a session
+// that is ALIVE, six hours past a five-hour max_session_age, on a host whose
+// alive-target completeness is unlicensable.
+func seedAliveIncompleteMaxAgeRow(t *testing.T, env *reconcilerTestEnv) (*aliveIncompleteStopProvider, beads.Bead, exactSessionStartParams) {
+	t.Helper()
+	const name = "witness"
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: name, MaxSessionAge: "5h", StartCommand: "true"}},
+	}
+	provider := &aliveIncompleteStopProvider{unattendedStopProvider: &unattendedStopProvider{Fake: env.sp}}
+	if err := provider.Start(t.Context(), name, runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	if err := provider.SetMeta(name, "GC_INSTANCE_TOKEN", "test-token"); err != nil {
+		t.Fatalf("set runtime token: %v", err)
+	}
+	bead := env.createSessionBead(name, name)
+	env.markSessionActive(&bead)
+	env.setSessionMetadata(&bead, map[string]string{
+		"creation_complete_at": env.clk.Now().UTC().Add(-6 * time.Hour).Format(time.RFC3339),
+	})
+	mat := newMaxSessionAgeTracker()
+	mat.setConfig(name, 5*time.Hour, 0)
+	statusWriter, _, statusWriterErr := beads.ResolveConditionalWriter(env.store)
+	params := exactSessionStartParams{
+		Generation: 1, CityPath: "test-city", CityName: "test-city",
+		Config: env.cfg, Provider: provider, Store: env.store,
+		StatusWriter: statusWriter, StatusWriterError: statusWriterErr,
+		Recorder: events.Discard, RolloutMode: rollout.Require,
+		Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+		MaxSessionAgeTracker: mat,
+		DrainTracker:         env.dt,
+		DrainOps:             newDrainOps(provider),
+		DesiredSessionNames:  func() map[string]bool { return map[string]bool{name: true} },
+	}
+	return provider, bead, params
+}
+
+// TestExactDeadlineMaxAgeStopsAliveSessionOnIncompleteScan is ga-bxa8r's
+// specimen. D-DEADLINE's positive arm is the only destructive-BY-INTENT arm in
+// the family set the ga-i20db doctrine covers: the target is stopped precisely
+// BECAUSE it is alive. Gating that stop on scan completeness therefore demanded
+// a proof a live target can never supply, and the max-age kill — which is the
+// fleet's credential refresh — silently never fired under keyed ownership.
+//
+// Nothing about the destructive obligation is relaxed. Identity is fenced where
+// it is actually decidable: the revision + instance-token + name re-read below
+// the observation, the token-bound unattended stop, and
+// confirmDrainAckRuntimeDeadCompletion's COMPLETE proven-dead confirm, which
+// this fixture can satisfy only after the pane is gone.
+func TestExactDeadlineMaxAgeStopsAliveSessionOnIncompleteScan(t *testing.T) {
+	env := newReconcilerTestEnv()
+	provider, bead, params := seedAliveIncompleteMaxAgeRow(t, env)
+	info, response, err := getAuthoritativeSessionStartPersistedRecord(env.store, bead.ID)
+	if err != nil {
+		t.Fatalf("authoritative read: %v", err)
+	}
+	if !exactSessionDeadlineStopCandidate(params, info, response, env.clk.Now().UTC()) {
+		t.Fatal("the fixture never fires its max-age deadline, so nothing here proves the gate withheld the stop")
+	}
+
+	owner, err := reconcileExactSessionDeadlineStop(
+		t.Context(),
+		sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionDeadline},
+		params, info, response, env.clk,
+	)
+	if err != nil {
+		t.Fatalf("an alive session's incomplete scan parked the max-age stop: %v", err)
+	}
+	if owner != exactSessionStartKeyedOwner {
+		t.Fatalf("owner = %v, want keyed ownership", owner)
+	}
+	if provider.IsRunning("witness") {
+		t.Fatal("the over-age runtime is still alive; the max-age stop never fired")
+	}
+	if calls := provider.stopSnapshot(); len(calls) != 1 || calls[0].expectedToken != "test-token" {
+		t.Fatalf("unattended stop calls = %#v, want exactly one token-bound stop", calls)
+	}
+	if got := env.sessionInfo(bead.ID); got.SleepReason != "max-session-age" || got.MetadataState != string(sessionpkg.StateAsleep) {
+		t.Fatalf("durable row = state:%q sleep_reason:%q, want the max-session-age sleep patch", got.MetadataState, got.SleepReason)
+	}
+}
+
+// TestExactDeadlineDeadIncompleteObservationStillParks is the fail-closed
+// control for the specimen above, and it must fail DIFFERENTLY: same fixture,
+// same unlicensable-completeness provider, but the runtime is already gone. A
+// NEGATIVE incomplete observation cannot tell dead apart from unobserved, so the
+// handler must still refuse with zero effect rather than write a sleep patch
+// onto a row whose agent may still be working behind an unreadable probe.
+func TestExactDeadlineDeadIncompleteObservationStillParks(t *testing.T) {
+	env := newReconcilerTestEnv()
+	provider, bead, params := seedAliveIncompleteMaxAgeRow(t, env)
+	provider.alwaysIncomplete = true
+	if err := provider.Stop("witness"); err != nil {
+		t.Fatalf("stop runtime: %v", err)
+	}
+	info, response, err := getAuthoritativeSessionStartPersistedRecord(env.store, bead.ID)
+	if err != nil {
+		t.Fatalf("authoritative read: %v", err)
+	}
+
+	owner, err := reconcileExactSessionDeadlineStop(
+		t.Context(),
+		sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionDeadline},
+		params, info, response, env.clk,
+	)
+	if err == nil || !strings.Contains(err.Error(), "liveness observation is incomplete") {
+		t.Fatalf("err = %v, want the incomplete-liveness park for a negative unproven observation", err)
+	}
+	if owner != exactSessionStartKeyedOwner {
+		t.Fatalf("owner = %v, want keyed ownership", owner)
+	}
+	if calls := provider.stopSnapshot(); len(calls) != 0 {
+		t.Fatalf("unattended stop calls = %#v, want zero effect on an unproven absence", calls)
+	}
+	if got := env.sessionInfo(bead.ID); got.SleepReason != "" || got.MetadataState != string(sessionpkg.StateActive) {
+		t.Fatalf("durable row = state:%q sleep_reason:%q, want an untouched active row", got.MetadataState, got.SleepReason)
+	}
 }

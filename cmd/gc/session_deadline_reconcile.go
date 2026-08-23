@@ -309,10 +309,29 @@ func reconcileExactSessionDeadlineStop(
 		ProcessNames:         processNames,
 		IncarnationStartedAt: incarnationStartedAt,
 	})
-	if !liveness.Complete {
-		return yieldOrPark(errors.New("exact over-deadline session liveness observation is incomplete"))
-	}
+	// Scan completeness proves ABSENCE; a positive observation is decisive on its
+	// own. This arm's stop is destructive BY INTENT — the target is killed
+	// precisely because it is alive — and that is exactly what made the
+	// unconditional gate a wedge rather than a safety net: a live pane withholds
+	// the tmux-absence license (TmuxSessionProvenAbsent) that lets the /proc sweep
+	// clear post-incarnation strangers, so on a busy host Complete is unreachable
+	// for the very targets this family exists to stop, and the max-age kill —
+	// which is the fleet's credential refresh — silently never fired (ga-bxa8r).
+	//
+	// Completeness was never what fenced identity here. Stopping the WRONG
+	// incarnation is refused by the revision + instance-token + name re-read
+	// below, by the token-bound unattended stop, and by
+	// confirmDrainAckRuntimeDeadCompletion's COMPLETE proven-dead confirm — which
+	// stays, and is satisfiable, because once the pane is gone the license IS
+	// granted. So the destructive path still ends on a complete proof; it just no
+	// longer demands one it cannot obtain before acting.
 	if !liveness.Running && !liveness.Alive {
+		if !liveness.Complete {
+			// Dead cannot be told apart from unobserved, and this arm's own
+			// no-op hand-off would silently retire a deadline the row still
+			// owes. Fail closed; the condition is level-triggered.
+			return yieldOrPark(errors.New("exact over-deadline session liveness observation is incomplete"))
+		}
 		// Nothing to stop. A durably-awake row with a dead runtime is D-ORPHAN's
 		// and D-SLEEP's condition, not this family's.
 		return exactSessionStartKeyedOwner, nil

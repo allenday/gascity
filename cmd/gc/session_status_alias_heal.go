@@ -70,17 +70,23 @@ func healExactSessionActiveAlias(params exactSessionStartParams, sessionID strin
 		return false
 	}
 	// Liveness is the whole premise: the planner was asked what a LIVE row owes,
-	// so an unreadable probe or a dead runtime means the answer does not apply.
-	// A dead `active` row projects to asleep, which is not neutral and not this
-	// heal's to write, so both cases keep the stored alias — the same fail-closed
-	// rule D-DRAIN uses before it acts on an absence it cannot prove.
+	// so anything short of a POSITIVE observation means the answer does not
+	// apply. A dead `active` row projects to asleep, which is not neutral and not
+	// this heal's to write, so it keeps the stored alias.
+	//
+	// Scan completeness is deliberately not asked for. It proves ABSENCE, and
+	// this arm never infers absence — it acts only on presence. Demanding it
+	// meant the alias could only ever be normalized on a host quiet enough to
+	// license an alive target's sweep, which is no host running agents: a live
+	// pane withholds the very tmux-absence license the /proc scan needs
+	// (ga-bxa8r).
 	liveness := runtime.ObserveFreshLiveness(params.Provider, runtime.LivenessTarget{
 		SessionID:            info.ID,
 		SessionName:          info.SessionNameMetadata,
 		ProcessNames:         drainAckStopPendingProcessNames(params.Config, info),
 		IncarnationStartedAt: drainAckIncarnationStartedAt(info),
 	})
-	if !liveness.Complete || (!liveness.Running && !liveness.Alive) {
+	if !liveness.Running && !liveness.Alive {
 		return false
 	}
 	applied, err := applyHealPatchFenced(sessionFrontDoor(params.Store), info.ID, response.Revision, plan.Patch)

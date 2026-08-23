@@ -137,17 +137,25 @@ func reconcileExactSessionStrandedRepair(
 		ProcessNames:         drainAckStopPendingProcessNames(params.Config, info),
 		IncarnationStartedAt: drainAckIncarnationStartedAt(info),
 	})
-	if !liveness.Complete {
-		// Absence is not proven. Refuse rather than clear a claim a live member
-		// may still be working; the condition is level-triggered.
-		return yieldOrPark(errors.New("exact stranded pool slot liveness observation is incomplete"))
-	}
+	// Scan completeness proves ABSENCE; a positive observation is decisive on its
+	// own. A live member holds a pane, and a live pane withholds the very
+	// tmux-absence license (TmuxSessionProvenAbsent) the /proc sweep needs to
+	// clear post-incarnation strangers — so an unconditional Complete gate parked
+	// exactly the rows this rung exists to protect (ga-bxa8r). The refusal below
+	// is the whole point: it is non-destructive, and a running worker keeps its
+	// claim on the strength of being seen running.
 	if liveness.Running || liveness.Alive {
 		// The member is slow, not stopped. Legacy's marker survives a tick it
 		// never observed alive, so this is the rung that keeps a running worker's
 		// claim: record the refusal and leave the row alone.
 		recordExactSessionStrandedRepairTrace(params, admission, info, TraceOutcomeKeptOpen, 0, false)
 		return exactSessionStartKeyedOwner, nil
+	}
+	if !liveness.Complete {
+		// Absence is not proven, and the repair below IS the destructive step.
+		// Refuse rather than clear a claim a live member may still be working;
+		// the condition is level-triggered.
+		return yieldOrPark(errors.New("exact stranded pool slot liveness observation is incomplete"))
 	}
 
 	latest, latestResponse, readErr := getAuthoritativeSessionStartPersistedRecord(params.Store, info.ID)

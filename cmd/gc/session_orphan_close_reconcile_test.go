@@ -20,10 +20,16 @@ import (
 // observation completes and reports the runtime neither running nor alive. It
 // is the fixture the whole family turns on — a close behind an unproven absence
 // is the #3872 orphaning bug.
+//
+// unlicensableAlive models the busy-host asymmetry instead (ga-bxa8r): a LIVE
+// target holds a pane, a live pane withholds the tmux-absence license the /proc
+// sweep needs, and so its observation is positive-but-incomplete forever, while
+// the same probe completes the moment the pane is gone.
 type deadRuntimeProvider struct {
 	*runtime.Fake
-	incomplete bool
-	observed   int
+	incomplete        bool
+	unlicensableAlive bool
+	observed          int
 }
 
 func (p *deadRuntimeProvider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
@@ -32,7 +38,7 @@ func (p *deadRuntimeProvider) ObserveFreshLiveness(target runtime.LivenessTarget
 		return runtime.Liveness{Complete: false}
 	}
 	running := p.IsRunning(target.SessionName)
-	return runtime.Liveness{Running: running, Alive: running, Complete: true}
+	return runtime.Liveness{Running: running, Alive: running, Complete: !running || !p.unlicensableAlive}
 }
 
 func (p *deadRuntimeProvider) StopUnattendedSession(name, _ string) error { return p.Stop(name) }
@@ -347,6 +353,56 @@ func TestExactOrphanUnprovenAbsenceRefusesWithZeroEffect(t *testing.T) {
 				t.Fatal("refused close stopped the runtime; the close arm never touches the provider")
 			}
 		})
+	}
+}
+
+// TestExactOrphanLiveRowReachesTheDrainArmOnIncompleteScan is ga-bxa8r's
+// D-ORPHAN specimen. The POSITIVE arm here is not a no-op: a live undesired row
+// is handed to the WD.4 drain arm from inside this very observation, and that
+// hand-off is the family's whole answer for a session that must go away
+// gracefully. Because a live pane withholds the tmux-absence license, the
+// unconditional Complete gate parked the row above the hand-off on any busy
+// host, so a live undesired session was never drained and never closed — it just
+// re-parked every sweep.
+//
+// The destructive close below keeps its proof obligation untouched; it is only
+// reachable from the negative arm, which still demands a COMPLETE observation.
+func TestExactOrphanLiveRowReachesTheDrainArmOnIncompleteScan(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
+	provider := &deadRuntimeProvider{Fake: env.sp, unlicensableAlive: true}
+	bead := env.createSessionBead("orphan", "orphan")
+	env.markSessionActive(&bead)
+	if err := provider.Start(t.Context(), "orphan", runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+
+	info, response, err := getAuthoritativeSessionStartPersistedRecord(env.store, bead.ID)
+	if err != nil {
+		t.Fatalf("authoritative read: %v", err)
+	}
+	params := newExactOrphanCloseParams(env, provider, map[string]bool{})
+	params.DrainTracker = env.dt
+
+	handled, owner, err := reconcileExactSessionDetectorFamily(
+		t.Context(), orphanCloseAdmission(bead.ID), params, info, response, env.clk)
+	if !handled {
+		t.Fatal("the seam did not claim an undesired row")
+	}
+	if err != nil {
+		t.Fatalf("a live row's incomplete scan parked the orphan hand-off: %v", err)
+	}
+	if owner != exactSessionStartKeyedOwner {
+		t.Fatalf("owner = %v, want keyed ownership", owner)
+	}
+	if env.dt.get(bead.ID) == nil {
+		t.Fatal("the live undesired row never reached the drain arm; a positive observation must license the hand-off")
+	}
+	if after, _ := env.store.Get(bead.ID); after.Status == "closed" {
+		t.Fatal("a live row was closed; the close arm is the negative arm's alone")
+	}
+	if !provider.IsRunning("orphan") {
+		t.Fatal("the close arm touched the provider")
 	}
 }
 
