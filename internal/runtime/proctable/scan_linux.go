@@ -40,7 +40,7 @@ func ScanBySessionIDSince(id string, incarnationStartedAt time.Time) ([]runtime.
 // scope — the pane lineage the runtime layer spawned for this incarnation plus
 // every owned process no proof could exclude — NOT absence across the whole
 // host: unreadable owned processes provably outside that scope (predating the
-// incarnation, living in another live pane's spawn scope, or rooted in a
+// incarnation, belonging to another live pane's spawn lineage, or rooted in a
 // foreign pre-incarnation lineage) do not cost the sweep its completeness
 // (ga-lp5w6). Processes the kernel has already killed leave the domain before
 // any of that: a corpse cannot be a living runtime (ga-f7v2ft.194).
@@ -142,7 +142,7 @@ func scanWithRootSinceInScope(root, id string, incarnationStartedAt time.Time, s
 			} else if proofErr != nil {
 				residue.add(fmt.Errorf("proving tmux parent for pid %d: %w", pid, proofErr))
 			}
-			if irrelevant, proofErr := unreadableProcessProvenInForeignLivePaneScope(
+			if irrelevant, proofErr := unreadableProcessProvenUnderForeignLivePaneScope(
 				root,
 				pid,
 				id,
@@ -220,9 +220,9 @@ func scanWithRootSinceInScope(root, id string, incarnationStartedAt time.Time, s
 // non-dumpable agent and a sudo child both stay unreadable to the uid that owns
 // them. None may be assumed absent — a sudo child can outlive the runtime
 // that spawned it and keep carrying its GC_SESSION_ID — but some can be PROVEN
-// outside the incarnation's reachable scope: predating it, living in another
-// live pane's spawn scope, or rooted in a foreign pre-incarnation lineage
-// (the unreadableProcessProven* adjudications, ga-lp5w6). Kernel-dead
+// outside the incarnation's reachable scope: predating it, belonging to
+// another live pane's spawn lineage, or rooted in a foreign pre-incarnation
+// lineage (the unreadableProcessProven* adjudications, ga-lp5w6). Kernel-dead
 // processes never reach here at all: processProvenKernelDead drops them
 // before the environ read, counted rather than itemized. What remains in the
 // residue is the genuinely undecidable set, each failure still costs the sweep
@@ -448,21 +448,38 @@ func unreadableProcessProvenOutsideIncarnation(
 // is either a pathological tree or a ppid cycle, and both must fail closed.
 const maxUnreadableProofChainHops = 32
 
-// unreadableProcessProvenInForeignLivePaneScope adjudicates an unreadable
-// owned process inside a unique tmux pane spawn scope by following its parent
-// chain to the scope's exit — the live process that spawned the pane. If that
-// spawner predates the incarnation and its readable environment does not carry
-// the target session ID, the pane belongs to some other lineage: a unique
-// spawn scope holds exactly one pane's subtree, membership only changes by an
-// explicit privileged cgroup write, and the target's own incarnation-spawned
-// pane would hang off the same spawner only when the caller-supplied license —
-// a same-generation COMPLETE tmux observation proving the target session
-// absent — could not have been granted. Every undecidable link (an ancestor
-// re-parented to init, an unreadable, kernel-dead or post-incarnation spawner,
-// an unstable chain) declines, leaving the process in the residue. Dead
-// intermediate links are fine: a zombie's ppid still records who spawned it,
-// so the walk passes through it to the scope's live exit.
-func unreadableProcessProvenInForeignLivePaneScope(
+// unreadableProcessProvenUnderForeignLivePaneScope adjudicates an unreadable
+// owned process by the pane its lineage belongs to. It ascends the parent
+// chain to the anchoring ancestor — the nearest process inside a unique tmux
+// pane spawn scope, which is the candidate itself in the ordinary case — and
+// then follows that scope to its exit: the live process that spawned the pane.
+// If that spawner predates the incarnation and its readable environment does
+// not carry the target session ID, the pane belongs to some other lineage: a
+// unique spawn scope holds exactly one pane's subtree, membership only changes
+// by an explicit privileged cgroup write, and the target's own
+// incarnation-spawned pane would hang off the same spawner only when the
+// caller-supplied license — a same-generation COMPLETE tmux observation
+// proving the target session absent — could not have been granted.
+//
+// The ascent is what covers a fork that escaped its pane's scope: a sudo child
+// left behind in the cgroup the pane was spawned from is in no spawn scope of
+// its own, so keying the proof on the candidate's own cgroup made one stray
+// fork deny absence for every incarnation younger than it — 1 of 26 sibling
+// sudo pairs on a production host, and the whole fleet's yield volume
+// (ga-f7v2ft.201). Descent carries the attribution the cgroup lost: whatever
+// its own cgroup says, the candidate was forked from inside that pane's
+// subtree, and the target's own escaped fork would hang off the target's pane
+// instead. The inherited exclusion is therefore no wider than the anchoring
+// scope's own — an anchoring scope that cannot prove itself foreign proves
+// nothing for anything beneath it.
+//
+// Every undecidable link (an ancestor re-parented to init, a chain that
+// reaches init without passing through any spawn scope, an unreadable,
+// kernel-dead or post-incarnation spawner, an unstable chain) declines,
+// leaving the process in the residue. Dead intermediate links are fine: a
+// zombie's ppid still records who spawned it, so the walk passes through it to
+// the scope's live exit.
+func unreadableProcessProvenUnderForeignLivePaneScope(
 	root string,
 	pid int,
 	targetSessionID string,
@@ -484,22 +501,40 @@ func unreadableProcessProvenInForeignLivePaneScope(
 	if err != nil || !exists {
 		return false, err
 	}
-	if !isUniqueTmuxSpawnScope(candidateBefore.Cgroup) {
-		return false, nil
+
+	// chain records the walked lineage, candidate first, up to but not
+	// including the scope-exit spawner (which the exit branch rechecks with
+	// its own liveness requirement), so the recheck can prove the candidate
+	// and the anchoring ancestor held still too.
+	chain := []processIdentity{candidateBefore}
+	anchorCgroup := ""
+	if isUniqueTmuxSpawnScope(candidateBefore.Cgroup) {
+		anchorCgroup = candidateBefore.Cgroup
 	}
 
 	cur := candidateBefore
 	for range maxUnreadableProofChainHops {
 		if cur.PPID <= 1 {
 			// A chain that exits to init is the re-parented orphan shape — the
-			// scope's pane is gone and nothing proves whose pane it was.
+			// pane is gone and nothing proves whose pane it was.
 			return false, nil
 		}
 		parent, exists, err := readProcessIdentity(root, cur.PPID)
 		if err != nil || !exists {
 			return false, err
 		}
-		if parent.Cgroup == candidateBefore.Cgroup {
+		if anchorCgroup == "" {
+			// Still ascending out of the escaped segment: the first ancestor
+			// inside a unique spawn scope anchors the attribution.
+			if isUniqueTmuxSpawnScope(parent.Cgroup) {
+				anchorCgroup = parent.Cgroup
+			}
+			chain = append(chain, parent)
+			cur = parent
+			continue
+		}
+		if parent.Cgroup == anchorCgroup {
+			chain = append(chain, parent)
 			cur = parent
 			continue
 		}
@@ -522,26 +557,44 @@ func unreadableProcessProvenInForeignLivePaneScope(
 		if parentEnv["GC_SESSION_ID"] == targetSessionID {
 			return false, nil
 		}
-		parentAfter, exists, err := readProcessIdentity(root, parent.PID)
-		if err != nil || !exists {
-			return false, err
-		}
-		candidateAfter, exists, err := readProcessIdentity(root, pid)
-		if err != nil || !exists {
-			return false, err
-		}
 		// The recheck proves the observation held still while the evidence was
 		// read: same processes in the same positions, and the spawner — whose
 		// environ IS the evidence — still alive. Scheduler-state flips are not
 		// movement (ga-i20db); a spawner that died mid-proof is (ga-f7v2ft.194).
+		parentAfter, exists, err := readProcessIdentity(root, parent.PID)
+		if err != nil || !exists {
+			return false, err
+		}
 		if !parentAfter.sameAdjudicatedProcess(parent) ||
-			processStateIsKernelDead(parentAfter.State) ||
-			!candidateAfter.sameAdjudicatedProcess(candidateBefore) {
+			processStateIsKernelDead(parentAfter.State) {
 			return false, nil
+		}
+		stable, err := chainStillInPlace(root, chain)
+		if err != nil || !stable {
+			return false, err
 		}
 		return true, nil
 	}
 	return false, nil
+}
+
+// chainStillInPlace re-reads a proof's walked lineage and reports whether
+// every link is the same process in the same adjudication position. The
+// candidate may have escaped its pane's spawn scope, in which case the links
+// between it and the anchoring ancestor carry the attribution its own cgroup
+// no longer does — so a re-parenting or a cgroup migration anywhere along the
+// chain invalidates the proof, not only one at its ends.
+func chainStillInPlace(root string, chain []processIdentity) (bool, error) {
+	for _, before := range chain {
+		after, exists, err := readProcessIdentity(root, before.PID)
+		if err != nil || !exists {
+			return false, err
+		}
+		if !after.sameAdjudicatedProcess(before) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // unreadableProcessProvenForeignLineage adjudicates an unreadable owned

@@ -22,10 +22,11 @@ import (
 // Two proofs narrow the verdict without weakening the protection:
 //
 //   - the live-pane-scope proof (licensed by the caller's own same-generation
-//     tmux observation proving the target session absent): a process inside a
-//     unique tmux pane spawn scope whose scope chain exits to a live,
-//     pre-incarnation spawner that does not carry the target session ID
-//     belongs to some other pane;
+//     tmux observation proving the target session absent): a process whose
+//     lineage is anchored in a unique tmux pane spawn scope — its own, or the
+//     nearest ancestor's when a fork escaped the scope (ga-f7v2ft.201) —
+//     whose scope chain exits to a live, pre-incarnation spawner that does not
+//     carry the target session ID belongs to some other pane;
 //   - the foreign-lineage proof: a process whose parent chain is foreign-uid
 //     all the way to a pre-incarnation ancestor (never touching init) has its
 //     lineage rooted outside anything this session could have spawned.
@@ -81,6 +82,146 @@ func buildForeignPaneScopeFixture(t *testing.T, spawnerEnv map[string]string, sp
 	writeFakeProcessCgroup(t, sudoKidDir, scope)
 
 	return root
+}
+
+// buildEscapedSudoChildFixture builds the gci-f1289m specimen
+// (ga-f7v2ft.201): the foreign-pane fixture with ONE fork left behind. The
+// outer sudo migrated into the pane's spawn scope; its privileged child stayed
+// in the cgroup the pane was spawned from — the supervisor's own service
+// cgroup — so the candidate's OWN cgroup is not a tmux spawn scope even though
+// its parent's is.
+func buildEscapedSudoChildFixture(t *testing.T, spawnerEnv map[string]string, spawnerStartTicks uint64) string {
+	t.Helper()
+	root := buildForeignPaneScopeFixture(t, spawnerEnv, spawnerStartTicks)
+	writeFakeProcessCgroup(t, filepath.Join(root, "902"), scanScopeTestSpawnerCgroup)
+	return root
+}
+
+// TestScanWithRootSinceInScopeClearsEscapedSudoChildOfForeignPaneScope is the
+// gci-f1289m production shape (ga-f7v2ft.201): a single privileged sudo child
+// that escaped its pane's spawn scope denied absence for every incarnation
+// younger than it, because both scope proofs keyed on the candidate's own
+// cgroup and never reached the parent chain. The pane the fork belongs to is
+// provably foreign, so the candidate inherits that exclusion and the sweep
+// must read COMPLETE.
+func TestScanWithRootSinceInScopeClearsEscapedSudoChildOfForeignPaneScope(t *testing.T) {
+	root := buildEscapedSudoChildFixture(t, map[string]string{}, 500)
+	boot := time.Unix(1_700_000_000, 0).UTC()
+
+	got, err := scanWithRootSinceInScope(root, "ga-target", boot.Add(10*time.Second), SessionScope{
+		TmuxSessionProvenAbsent: true,
+	})
+	if err != nil {
+		t.Fatalf("escaped sudo child made the licensed exact scan incomplete: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("licensed exact scan returned %d runtimes, want 0", len(got))
+	}
+}
+
+// TestScanWithRootSinceWithoutLicenseKeepsEscapedSudoChildClosed is the
+// license control for the widened proof: without a same-generation proof that
+// the target session is absent, the pane the fork belongs to could be the
+// target's own.
+func TestScanWithRootSinceWithoutLicenseKeepsEscapedSudoChildClosed(t *testing.T) {
+	root := buildEscapedSudoChildFixture(t, map[string]string{}, 500)
+	boot := time.Unix(1_700_000_000, 0).UTC()
+
+	got, err := scanWithRootSince(root, "ga-target", boot.Add(10*time.Second))
+	if err == nil {
+		t.Fatalf("unlicensed scan = %v, nil error; want incomplete without the pane-absence proof", got)
+	}
+}
+
+// TestScanWithRootSinceInScopeEscapedSudoChildProofFailsClosed keeps the
+// inheritance honest: a candidate outside every spawn scope may borrow an
+// ancestor's exclusion only when that ancestor's scope affirmatively proves
+// OUT. An anchoring scope that merely exists — or a chain that never reaches
+// one — leaves the candidate in the residue, which is what keeps the pinned
+// sudo-child protection (TestScanWithRootSinceUnreadableSudoChildProofFailsClosed)
+// meaningful.
+func TestScanWithRootSinceInScopeEscapedSudoChildProofFailsClosed(t *testing.T) {
+	boot := time.Unix(1_700_000_000, 0).UTC()
+	incarnation := boot.Add(10 * time.Second)
+
+	tests := []struct {
+		name    string
+		fixture func(t *testing.T) string
+	}{
+		{
+			// The anchoring scope's spawner carries the target identity: that
+			// pane could be the session's own, so nothing under it — inside the
+			// scope or escaped from it — is excluded.
+			name: "anchoring scope carries target identity",
+			fixture: func(t *testing.T) string {
+				return buildEscapedSudoChildFixture(t, map[string]string{"GC_SESSION_ID": "ga-target"}, 500)
+			},
+		},
+		{
+			// A post-incarnation spawner could itself belong to the target's
+			// lineage, so its pane proves nothing about the escaped fork.
+			name: "anchoring scope spawner postdates incarnation",
+			fixture: func(t *testing.T) string {
+				return buildEscapedSudoChildFixture(t, map[string]string{}, 1500)
+			},
+		},
+		{
+			// An unreadable spawner cannot say whose pane it spawned.
+			name: "anchoring scope spawner environ unreadable",
+			fixture: func(t *testing.T) string {
+				root := buildEscapedSudoChildFixture(t, map[string]string{}, 500)
+				if err := os.Remove(filepath.Join(root, "900", "environ")); err != nil {
+					t.Fatalf("remove spawner environ: %v", err)
+				}
+				writeUnreadableEnviron(t, filepath.Join(root, "900"))
+				return root
+			},
+		},
+		{
+			// Nothing in the chain is in a spawn scope: the whole lineage
+			// escaped, so there is no pane to inherit an exclusion from.
+			name: "chain reaches init without any spawn scope",
+			fixture: func(t *testing.T) string {
+				root := buildEscapedSudoChildFixture(t, map[string]string{}, 500)
+				writeFakeProcessCgroup(t, filepath.Join(root, "901"), scanScopeTestSpawnerCgroup)
+				return root
+			},
+		},
+		{
+			// The escaped fork re-parented to init: the link that named its
+			// pane is gone, which is the orphaned sudo-child shape itself.
+			name: "escaped fork re-parented to init",
+			fixture: func(t *testing.T) string {
+				root := buildEscapedSudoChildFixture(t, map[string]string{}, 500)
+				writeFakeProcessStat(t, filepath.Join(root, "902"), 902, 1, 2100)
+				return root
+			},
+		},
+		{
+			// The pane-scoped ancestor vanished between the walk and the
+			// recheck: an unfinished proof never clears.
+			name: "anchoring ancestor vanishes mid-proof",
+			fixture: func(t *testing.T) string {
+				root := buildEscapedSudoChildFixture(t, map[string]string{}, 500)
+				if err := os.RemoveAll(filepath.Join(root, "901")); err != nil {
+					t.Fatalf("remove pane-scoped ancestor: %v", err)
+				}
+				return root
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := tt.fixture(t)
+			got, err := scanWithRootSinceInScope(root, "ga-target", incarnation, SessionScope{
+				TmuxSessionProvenAbsent: true,
+			})
+			if err == nil {
+				t.Fatalf("undecidable escaped-fork shape scan = %v, nil error; want incomplete", got)
+			}
+		})
+	}
 }
 
 // TestScanWithRootSinceInScopeClearsStrangersInForeignLivePaneScopes is the
