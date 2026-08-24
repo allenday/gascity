@@ -253,6 +253,32 @@ func TestParityJoinDetectionLevelIgnoresReasonAndOutcome(t *testing.T) {
 	}
 }
 
+// TestParityJoinCountsKeyedAppliedEffectFromAnUnarmedCity is the census-shaped
+// half of ga-f7v2ft.161: the readers key on effect_owner and effect_applied, not
+// on the trace tier, so lifting an applied keyed effect to the always-on tier
+// has to make it countable with no reader change at all.
+//
+// The corpus here is not hand-seeded. It is whatever a real keyed handler left
+// in a real trace store on a city that armed NOTHING — the only configuration a
+// released opt-in reconciler is ever observed in, and the one the soak census
+// found empty.
+func TestParityJoinCountsKeyedAppliedEffectFromAnUnarmedCity(t *testing.T) {
+	records, _ := zombieUnarmedTraceRecords(t, "model_not_found: gpt-5.3-codex-spark")
+
+	report := buildParityJoinReport(records, parityJoinOptions{Bar: 0.995})
+
+	if report.Cycles.WithoutDetailArms == 0 {
+		t.Fatalf("without_detail_arms = 0, want the unarmed shipping shape (%+v)", report.Cycles)
+	}
+	row := parityJoinFamilyRow(t, report, parityJoinFamilyZombie)
+	if row.Keyed != 1 {
+		t.Fatalf("D-ZOMBIE keyed = %d, want 1: the census cannot see the opt-in acting (%+v)", row.Keyed, row)
+	}
+	if report.ShadowEffectViolations != 0 {
+		t.Fatalf("shadow_effect_violations = %d, want 0: an always-on keyed effect is not a shadow record", report.ShadowEffectViolations)
+	}
+}
+
 // Singletons and future keyed-act records are counted per family and kept out of
 // the legacy/detector pairing.
 func TestParityJoinCountsSingletonsAndKeyedRecords(t *testing.T) {

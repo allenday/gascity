@@ -555,24 +555,22 @@ func recordExactOrdinaryResetStopTrace(params exactSessionStartParams, info sess
 		return
 	}
 	template := normalizedSessionTemplateInfo(info, params.Config)
-	if cycle.detailEnabled(template) {
-		cycle.recordAdmittedDetailOperation(
-			TraceSiteLifecycleDrainAdvance,
-			TraceReasonFreshCycle,
-			TraceOutcomeSuccess,
-			"exact_session_reset_stop",
-			template,
-			info.ID,
-			info.SessionNameMetadata,
-			TraceSource(cycle.sourceFor(template)),
-			elapsed,
-			map[string]any{
-				"generation":     params.Generation,
-				"instance_token": info.InstanceToken,
-				"effect_applied": true,
-			},
-		)
-	}
+	cycle.recordKeyedEffect(
+		TraceSiteLifecycleDrainAdvance,
+		TraceReasonFreshCycle,
+		TraceOutcomeSuccess,
+		"exact_session_reset_stop",
+		template,
+		info.ID,
+		info.SessionNameMetadata,
+		elapsed,
+		map[string]any{
+			"generation":     params.Generation,
+			"instance_token": info.InstanceToken,
+			"effect_owner":   detectorKeyedEffectOwner,
+			"effect_applied": true,
+		},
+	)
 	if traceErr := cycle.End(TraceCompletionCompleted, nil); traceErr != nil && params.Stderr != nil {
 		fmt.Fprintf(params.Stderr, "session reconciler: recording exact reset stop trace: %v\n", traceErr) //nolint:errcheck // tracing is observational
 	}
@@ -2044,26 +2042,24 @@ func reconcileExactSessionStartWithOwner(
 			cycle := params.Trace.BeginCycle(TraceTickTriggerControl, "exact_session_suspend_stop", time.Now().UTC(), params.Config)
 			if cycle != nil {
 				template := normalizedSessionTemplateInfo(info, params.Config)
-				if cycle.detailEnabled(template) {
-					cycle.recordAdmittedDetailOperation(
-						TraceSiteLifecycleDrainAdvance,
-						TraceReasonUserHold,
-						TraceOutcomeSuccess,
-						"exact_session_suspend_stop",
-						template,
-						info.ID,
-						info.SessionNameMetadata,
-						TraceSource(cycle.sourceFor(template)),
-						time.Since(stopStartedAt),
-						map[string]any{
-							"admission":         string(admission.Source),
-							"admission_version": admission.Version,
-							"generation":        params.Generation,
-							"instance_token":    info.InstanceToken,
-							"effect_applied":    true,
-						},
-					)
-				}
+				cycle.recordKeyedEffect(
+					TraceSiteLifecycleDrainAdvance,
+					TraceReasonUserHold,
+					TraceOutcomeSuccess,
+					"exact_session_suspend_stop",
+					template,
+					info.ID,
+					info.SessionNameMetadata,
+					time.Since(stopStartedAt),
+					map[string]any{
+						"admission":         string(admission.Source),
+						"admission_version": admission.Version,
+						"generation":        params.Generation,
+						"instance_token":    info.InstanceToken,
+						"effect_owner":      detectorKeyedEffectOwner,
+						"effect_applied":    true,
+					},
+				)
 				if traceErr := cycle.End(TraceCompletionCompleted, nil); traceErr != nil && params.Stderr != nil {
 					fmt.Fprintf(params.Stderr, "session reconciler: recording exact suspend stop trace: %v\n", traceErr) //nolint:errcheck // tracing is observational
 				}
@@ -3404,30 +3400,28 @@ func recordExactSessionStartCommit(params exactSessionStartParams, admission ses
 	if cycle == nil {
 		return
 	}
-	if cycle.detailEnabled(template) {
-		duration := result.finished.Sub(result.started)
-		payload := result.phases.tracePayload(info.ID, duration)
-		payload["admission"] = string(admission.Source)
-		payload["admission_version"] = admission.Version
-		if lease := sessionStartAdmissionLeaseFamily(admission); lease != "" {
-			payload["start_lease"] = lease
-		}
-		payload["generation"] = params.Generation
-		payload["instance_token"] = info.InstanceToken
-		payload["effect_applied"] = true
-		cycle.recordAdmittedDetailOperation(
-			TraceSiteLifecycleStartCommit,
-			TraceReasonStart,
-			TraceOutcomeSuccess,
-			"exact_session_start_commit",
-			template,
-			info.ID,
-			info.SessionName,
-			TraceSource(cycle.sourceFor(template)),
-			duration,
-			payload,
-		)
+	duration := result.finished.Sub(result.started)
+	payload := result.phases.tracePayload(info.ID, duration)
+	payload["admission"] = string(admission.Source)
+	payload["admission_version"] = admission.Version
+	if lease := sessionStartAdmissionLeaseFamily(admission); lease != "" {
+		payload["start_lease"] = lease
 	}
+	payload["generation"] = params.Generation
+	payload["instance_token"] = info.InstanceToken
+	payload["effect_owner"] = detectorKeyedEffectOwner
+	payload["effect_applied"] = true
+	cycle.recordKeyedEffect(
+		TraceSiteLifecycleStartCommit,
+		TraceReasonStart,
+		TraceOutcomeSuccess,
+		"exact_session_start_commit",
+		template,
+		info.ID,
+		info.SessionName,
+		duration,
+		payload,
+	)
 	if err := cycle.End(TraceCompletionCompleted, nil); err != nil && params.Stderr != nil {
 		fmt.Fprintf(params.Stderr, "session reconciler: recording exact start commit trace: %v\n", err) //nolint:errcheck
 	}

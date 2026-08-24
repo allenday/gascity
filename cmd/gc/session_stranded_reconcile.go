@@ -221,28 +221,25 @@ func recordExactSessionStrandedRepairTrace(
 	if template == "" {
 		template = info.Template
 	}
-	if cycle.detailEnabled(template) {
-		cycle.recordAdmittedDetailOperation(
-			TraceSiteSessionReconcileWakeSleep,
-			detectorReasonStrandedPoolSlot,
-			outcome,
-			"exact_session_stranded_repair",
-			template,
-			info.ID,
-			info.SessionNameMetadata,
-			TraceSource(cycle.sourceFor(template)),
-			duration,
-			map[string]any{
-				"admission":         string(admission.Source),
-				"admission_version": admission.Version,
-				"generation":        params.Generation,
-				"instance_token":    info.InstanceToken,
-				"close_reason":      strandedRepairCloseReason,
-				"effect_owner":      detectorKeyedEffectOwner,
-				"effect_applied":    applied,
-			},
-		)
-	}
+	cycle.recordKeyedEffect(
+		TraceSiteSessionReconcileWakeSleep,
+		detectorReasonStrandedPoolSlot,
+		outcome,
+		"exact_session_stranded_repair",
+		template,
+		info.ID,
+		info.SessionNameMetadata,
+		duration,
+		map[string]any{
+			"admission":         string(admission.Source),
+			"admission_version": admission.Version,
+			"generation":        params.Generation,
+			"instance_token":    info.InstanceToken,
+			"close_reason":      strandedRepairCloseReason,
+			"effect_owner":      detectorKeyedEffectOwner,
+			"effect_applied":    applied,
+		},
+	)
 	if err := cycle.End(TraceCompletionCompleted, nil); err != nil && params.Stderr != nil {
 		fmt.Fprintf(params.Stderr, "session reconciler: recording exact stranded repair trace: %v\n", err) //nolint:errcheck // tracing is observational
 	}

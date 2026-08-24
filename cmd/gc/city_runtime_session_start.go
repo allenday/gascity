@@ -336,6 +336,7 @@ func (cr *CityRuntime) recordExactSessionLifecycleStatusApplied(cfg *config.City
 		"generation":        result.ControllerGeneration,
 		"status_outcome":    exactSessionLifecycleStatusOutcomeTraceValue(result.Plan.Outcome),
 		"status_reason":     string(result.Plan.Reason),
+		"effect_owner":      detectorKeyedEffectOwner,
 		"effect_applied":    true,
 	})
 	if err := cycle.End(TraceCompletionCompleted, nil); err != nil {

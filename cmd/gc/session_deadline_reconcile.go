@@ -530,29 +530,26 @@ func recordExactSessionDeadlineTrace(
 		return
 	}
 	template := normalizedSessionTemplateInfo(info, params.Config)
-	if cycle.detailEnabled(template) {
-		reason, outcome := timerTraceCodes(decision)
-		cycle.recordAdmittedDetailOperation(
-			site,
-			reason,
-			outcome,
-			"exact_session_deadline_stop",
-			template,
-			info.ID,
-			info.SessionNameMetadata,
-			TraceSource(cycle.sourceFor(template)),
-			duration,
-			map[string]any{
-				"admission":         string(admission.Source),
-				"admission_version": admission.Version,
-				"generation":        params.Generation,
-				"instance_token":    info.InstanceToken,
-				"sleep_reason":      decision.SleepReason,
-				"effect_owner":      detectorKeyedEffectOwner,
-				"effect_applied":    applied,
-			},
-		)
-	}
+	reason, outcome := timerTraceCodes(decision)
+	cycle.recordKeyedEffect(
+		site,
+		reason,
+		outcome,
+		"exact_session_deadline_stop",
+		template,
+		info.ID,
+		info.SessionNameMetadata,
+		duration,
+		map[string]any{
+			"admission":         string(admission.Source),
+			"admission_version": admission.Version,
+			"generation":        params.Generation,
+			"instance_token":    info.InstanceToken,
+			"sleep_reason":      decision.SleepReason,
+			"effect_owner":      detectorKeyedEffectOwner,
+			"effect_applied":    applied,
+		},
+	)
 	if err := cycle.End(TraceCompletionCompleted, nil); err != nil && params.Stderr != nil {
 		fmt.Fprintf(params.Stderr, "session reconciler: recording exact deadline stop trace: %v\n", err) //nolint:errcheck // tracing is observational
 	}

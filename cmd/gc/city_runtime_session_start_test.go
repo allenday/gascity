@@ -2569,6 +2569,14 @@ func TestCityRuntimeSessionStartEventAppliesOneFencedStatusHeal(t *testing.T) {
 		witness.Fields["status_outcome"] != "heal" || witness.Fields["status_reason"] != string(sessionLifecycleStatusReasonHeal) {
 		t.Fatalf("applied status witness = %#v, want fenced applied event metadata mutation", witness)
 	}
+	// The status heal is a keyed effect like any other, so it carries the keyed
+	// ownership stamp. Without it the record claims an applied effect that no
+	// engine owns, and every keyed-effect filter — the parity join's role
+	// classifier, the soak census — steps over it even as it fires
+	// (ga-f7v2ft.161).
+	if witness.Fields["effect_owner"] != detectorKeyedEffectOwner {
+		t.Fatalf("applied status witness effect_owner = %#v, want %q", witness.Fields["effect_owner"], detectorKeyedEffectOwner)
+	}
 }
 
 func TestRecordExactSessionLifecycleStatusShadowUsesAdmissionToObservationLatency(t *testing.T) {

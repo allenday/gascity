@@ -274,32 +274,29 @@ func recordExactSessionZombieTrace(
 	if template == "" {
 		template = normalizedSessionTemplateInfo(info, params.Config)
 	}
-	if cycle.detailEnabled(template) {
-		code := detectorReasonZombie
-		if strings.TrimSpace(reason) != "" {
-			code = TraceReasonCode(reason)
-		}
-		cycle.recordAdmittedDetailOperation(
-			TraceSiteReconcilerTerminalProviderError,
-			code,
-			outcome,
-			"exact_session_zombie_mark",
-			template,
-			info.ID,
-			info.SessionNameMetadata,
-			TraceSource(cycle.sourceFor(template)),
-			duration,
-			map[string]any{
-				"admission":         string(admission.Source),
-				"admission_version": admission.Version,
-				"generation":        params.Generation,
-				"instance_token":    info.InstanceToken,
-				"session_bead_id":   info.ID,
-				"effect_owner":      detectorKeyedEffectOwner,
-				"effect_applied":    applied,
-			},
-		)
+	code := detectorReasonZombie
+	if strings.TrimSpace(reason) != "" {
+		code = TraceReasonCode(reason)
 	}
+	cycle.recordKeyedEffect(
+		TraceSiteReconcilerTerminalProviderError,
+		code,
+		outcome,
+		"exact_session_zombie_mark",
+		template,
+		info.ID,
+		info.SessionNameMetadata,
+		duration,
+		map[string]any{
+			"admission":         string(admission.Source),
+			"admission_version": admission.Version,
+			"generation":        params.Generation,
+			"instance_token":    info.InstanceToken,
+			"session_bead_id":   info.ID,
+			"effect_owner":      detectorKeyedEffectOwner,
+			"effect_applied":    applied,
+		},
+	)
 	if err := cycle.End(TraceCompletionCompleted, nil); err != nil && params.Stderr != nil {
 		fmt.Fprintf(params.Stderr, "session reconciler: recording exact zombie mark trace: %v\n", err) //nolint:errcheck // tracing is observational
 	}

@@ -190,33 +190,30 @@ func recordExactSessionDuplicateNamedTrace(
 		return
 	}
 	template := normalizedSessionTemplateInfo(info, params.Config)
-	if cycle.detailEnabled(template) {
-		outcome := TraceOutcomeApplied
-		if !applied {
-			outcome = TraceOutcomeSkipped
-		}
-		cycle.recordAdmittedDetailOperation(
-			TraceSiteSessionReconcileHealRetire,
-			detectorReasonDuplicateNamed,
-			outcome,
-			"exact_session_duplicate_named_retire",
-			template,
-			info.ID,
-			info.SessionNameMetadata,
-			TraceSource(cycle.sourceFor(template)),
-			duration,
-			map[string]any{
-				"admission":         string(admission.Source),
-				"admission_version": admission.Version,
-				"generation":        params.Generation,
-				"instance_token":    info.InstanceToken,
-				"winner_id":         winner.ID,
-				"session_identity":  namedSessionIdentityInfo(info),
-				"effect_owner":      detectorKeyedEffectOwner,
-				"effect_applied":    applied,
-			},
-		)
+	outcome := TraceOutcomeApplied
+	if !applied {
+		outcome = TraceOutcomeSkipped
 	}
+	cycle.recordKeyedEffect(
+		TraceSiteSessionReconcileHealRetire,
+		detectorReasonDuplicateNamed,
+		outcome,
+		"exact_session_duplicate_named_retire",
+		template,
+		info.ID,
+		info.SessionNameMetadata,
+		duration,
+		map[string]any{
+			"admission":         string(admission.Source),
+			"admission_version": admission.Version,
+			"generation":        params.Generation,
+			"instance_token":    info.InstanceToken,
+			"winner_id":         winner.ID,
+			"session_identity":  namedSessionIdentityInfo(info),
+			"effect_owner":      detectorKeyedEffectOwner,
+			"effect_applied":    applied,
+		},
+	)
 	if err := cycle.End(TraceCompletionCompleted, nil); err != nil && params.Stderr != nil {
 		fmt.Fprintf(params.Stderr, "session reconciler: recording exact duplicate named retire trace: %v\n", err) //nolint:errcheck // tracing is observational
 	}

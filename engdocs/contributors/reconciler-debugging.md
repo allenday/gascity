@@ -110,6 +110,20 @@ gc trace show --template repo/polecat --since 20m --json > /tmp/reconciler-after
 New records must carry a different `controller_instance_id`; do not treat old
 records in the append-only trace store as activity by the new controller.
 
+The arm buys DETAIL — the decisions, refusals and yields behind an outcome. It
+is not what proves the keyed engine is running. A keyed handler that commits an
+effect writes an always-on record carrying `effect_owner=keyed` and
+`effect_applied=true`, so an unarmed city already answers "is the opt-in
+acting?":
+
+```bash
+gc trace show --since 1h --json |
+  jq -c '.records[] | select(.fields.effect_owner == "keyed" and .fields.effect_applied == true)'
+```
+
+Empty output on a city that has reconciled something means the keyed engine did
+not act; it no longer means the trace was switched off.
+
 ## Canary queued nudge target selection
 
 `nudge_shadow` is boot-latched. To canary it on an existing city, prepare a
