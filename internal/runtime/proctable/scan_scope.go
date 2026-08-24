@@ -9,9 +9,10 @@ type SessionScope struct {
 	// TmuxSessionProvenAbsent reports that a COMPLETE tmux snapshot taken in
 	// the same fresh observation generation did not contain the target
 	// session. That fact licenses the live-pane-scope proof: with no live
-	// target pane, an unreadable process inside a unique tmux pane spawn
-	// scope whose scope chain exits to a live, pre-incarnation spawner not
-	// carrying the target session ID belongs to some other pane, and cannot
-	// poison this session's absence proof.
+	// target pane, an unreadable process whose parent chain is anchored in a
+	// unique tmux pane spawn scope — its own or, for a fork that escaped it,
+	// the nearest ancestor's — whose scope chain exits to a live,
+	// pre-incarnation spawner not carrying the target session ID belongs to
+	// some other pane, and cannot poison this session's absence proof.
 	TmuxSessionProvenAbsent bool
 }
