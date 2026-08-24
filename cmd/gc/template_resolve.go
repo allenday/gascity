@@ -801,6 +801,9 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
 		if cityUsesBdStoreContract(cityPath) {
+			if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+				return env, err
+			}
 			if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
 				// On projection errors, keep explicit empty keys so tmux
 				// clears stale inherited backend variables for the session.
@@ -822,6 +825,11 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 		return env, nil
 	}
 
+	if cityUsesBdStoreContract(cityPath) {
+		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+			return env, err
+		}
+	}
 	if err := applyResolvedRigDoltEnv(env, cityPath, rigRoot, rigConfigForScopeRoot(cityPath, rigRoot, rigs), false); err != nil {
 		mirrorBeadsDoltEnv(env)
 		if !isRecoverableManagedDoltEnvError(err) {
