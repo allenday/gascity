@@ -111,7 +111,10 @@ would need 6.94 logical changes per merged PR to stay near the first limit, or
 reviewed PR publication as the primary pressure model. [1]
 
 This makes batching a design requirement for a sufficiently hot repository,
-not for every fleet topology. GitHub Merge Queue grouping is publication
+not for every fleet topology. The registered compression target is at least
+ten logical changes per publication transaction in the hot-repository shape —
+the 6.94 floor plus thirty percent forge headroom
+([`0001-bounds.toml`](0001-bounds.toml)). GitHub Merge Queue grouping is publication
 scheduling: it does not create pre-PR logical batches or combine the underlying
 builds. A Gas City batch is a transport unit and must not erase the identity,
 dependency order, audit trail, or selective repair path of the logical changes
@@ -135,18 +138,34 @@ test and capacity model must include:
 - queue depth, oldest-ready age, tail latency, and post-burst drain time.
 
 Recent Gas City history should calibrate change shape, proof cost, failure rate,
-and human work. It does not set the target volume. Synthetic cases then exercise
-the four future workload shapes and stress the tails: a burst against one shared
-package, many independent component changes, a cache outage, a failing change
-at the front of the queue, and a coordinated change spanning Gas City, T3 Code,
-and the beads backend.
+and human work. It does not set the target volume. The burst profile and
+workload-shape mix are registered values: the initial registration uses the
+measured arrival distribution and a 55/20/15/10
+hot-repository/fleet/shared-core/cross-repository mix. Synthetic cases then
+exercise the four future workload shapes and stress the tails: a burst against
+one shared package, many independent component changes, a cache outage, a
+failing change at the front of the queue, and a coordinated change spanning
+Gas City, T3 Code, and the beads backend.
 
-For every constrained resource—the forge and its API, candidate construction,
-queues, runners, caches, publication, and human exception handling—offered load
-must remain below measured sustainable service capacity with positive headroom.
-Phase 0 establishes those service curves through baseline telemetry and
-controlled saturation tests. The capacity, tail-latency, compute, and
-human-work limits are then fixed before the combined load test.
+Constrained resources split into two classes. **Measured resources** are owned
+infrastructure — candidate construction, queues, runners, caches, the beads
+work ledger, and the event bus — whose sustainable service curves Phase 0
+establishes through baseline telemetry and controlled saturation tests.
+**Modeled resources** cannot be saturation-tested — the forge and its API,
+publication, routine review, and human exception handling — so each carries a
+registered capacity model naming its evidence basis, the largest canary that
+validated it, and an extrapolation factor capped at twenty times that canary.
+For every resource, offered load must remain below measured or model-predicted
+sustainable capacity with positive headroom.
+
+Every registered bound, budget, assumption, and ratchet lives in the checked
+ledger [`specs/proposals/0001-bounds.toml`](0001-bounds.toml). A bound is
+registered for a phase run only when the commit recording it predates that
+run; the ledger's git history is the audit trail, and a guard test in
+`test/docsync` keeps the ledger and this document in sync. Because the
+10,000/day figure is directional, bounds are ratchets anchored to measured
+baselines — re-derived at each sustained doubling of accepted-change volume —
+rather than fixed horizon values.
 
 ## 2. Start from Gas City's current system
 
@@ -357,7 +376,11 @@ Go backend remains beta and has unsupported edges, so it is an experiment, not
 the default architecture. [7][8]
 
 Before the pilot, register the acceptable miss-rate bound, confidence target,
-sample size, workload strata, and delayed observation window. Exercise seeded
+sample size, workload strata, and delayed observation window. The miss-rate
+bound is two-tier: one bound for human-reviewed lanes and a stricter bound
+plus an ongoing random full-union audit fraction for auto-admitted classes.
+Every bound is restated at exposure — expected escapes per day at current
+volume — and re-accepted at each sustained volume doubling. Exercise seeded
 hidden-dependency cases and retain random full-union runs after rollout so drift
 stays visible. Any missed failure broadens the rule and removes it from
 admission until it passes again.
@@ -412,27 +435,39 @@ loss and has a stop condition. A control enters admission only after its own
 safety gate passes. Phase 0 supplies the baseline used to set capacity, tail
 latency, compute, human-work, and safety limits; those limits are registered
 before the combined test rather than chosen after seeing its results.
+Registered means committed to the bounds ledger
+([`0001-bounds.toml`](0001-bounds.toml)): a bound counts for a run only when
+its commit predates that run, and a guard test keeps the ledger and this
+document in sync. Most bounds are ratchets — a baseline measured by the named
+phase, a no-regression rule, and re-derivation at each sustained doubling of
+accepted-change volume.
 
 ### Phase 0: establish identity and the baseline
 
 Define the Beads projection for parent outcomes and logical changes, then carry
 those IDs through candidates, proofs, batches, and publication transactions.
-Use controlled load to find each constrained resource's sustainable service
-curve rather than extrapolating from an underloaded production sample.
+Use controlled load to find each measured resource's sustainable service
+curve rather than extrapolating from an underloaded production sample; a
+modeled resource is validated instead by the largest canary its owner permits,
+and its capacity model records that canary and the extrapolation factor.
 
 For every required check and ready logical change, record:
 
 - creation, ready, queue-entry, verification, and publication times;
 - parent outcome, logical change, integration candidate, batch, and publication
   transaction IDs;
-- base SHA and reason each run or rerun was triggered;
+- base SHA and patch identity for each run, so rerun causes classify
+  mechanically: an identical patch on a new base is a base-advance rerun, and
+  an identical patch and base that now passes is a flake;
 - changed components and predicted proof set;
 - suite mode (`filtered` or `full`) and actual jobs executed;
 - wall time, compute time, queue time, and setup time;
 - cache hits, misses, and bytes transferred;
 - pass, failure, flake, and infrastructure-failure classification;
 - prior successes discarded solely because the base advanced;
-- human actions and minutes required to rebase, rerun, dequeue, or unblock;
+- human interventions (rerun, dequeue, manual rebase, forced merge) counted
+  from forge audit records, with a quarterly sampled time study converting
+  counts to minutes;
 - queue depth, oldest-ready age, and post-burst drain time;
 - offered load and sustainable service rate at each constrained resource; and
 - merge order, rollback, and broken-`main` outcomes.
@@ -446,14 +481,21 @@ Compute:
 | Publication compression | Accepted logical changes / publication transactions |
 | Proof churn ratio | Verification compute repeated after a base advance / total verification compute |
 | Invalidation surface | Proof nodes selected / proof nodes available |
-| Verification cost | Full-suite-equivalent compute / accepted logical change and completed parent outcome |
+| Verification cost | Full-suite-equivalent (FSE) compute / accepted logical change and completed parent outcome; one FSE is the full-union suite priced at the SHA pinned in the bounds ledger |
 | Queue amplification | Integration states validated / accepted logical changes |
 | Queue health | Queue depth, oldest-ready age, p95/p99 ready-to-canonical latency, and drain time |
 | Capacity headroom | Sustainable service capacity minus offered load at each constrained resource |
-| Human serialization cost | Maintainer interventions and minutes / accepted logical change |
+| Human serialization cost | Maintainer interventions / accepted logical change; minutes come only from the sampled time study |
+| Backlog latency | Creation-to-ready distribution; the hard bound applies to dependency-free changes only |
+| External value anchor | User-facing issues closed and shipped release-notes entries per week, reported beside throughput |
 
 The timing work should extend the existing `ga-80po0c.4` telemetry rather than
 create a parallel measurement system. [3][4]
+
+Phase 0 also registers the flake policy: a per-job flake-rate assumption held
+only until measurement replaces it, the mechanical classification rule above,
+and a quarantine rule for repeat offenders. No queue or batching phase begins
+before that policy is registered.
 
 ### Phase 1: change shaping
 
@@ -479,7 +521,10 @@ reported with its actual confidence and coverage, not as proof of impossibility.
 
 Run GitHub Merge Queue on a bounded stream. Measure base-advance reruns, queue
 latency, duplicate compute, and manual intervention. Exercise every required
-workflow, the live ruleset, the canary, and operator rollback.
+workflow, the live ruleset, the canary, and operator rollback. The phase runs
+under the registered queue-amplification bound, and its measured
+ready-to-canonical latency and post-burst drain become the baselines the
+admission-latency ratchet holds thereafter.
 
 **Stop condition:** if moving-main churn becomes negligible, do not add Zuul or
 build equivalent scheduling machinery in Refinery.
@@ -488,7 +533,13 @@ build equivalent scheduling machinery in Refinery.
 
 Replay and canary batches in the hot-repository workload. Measure publication
 compression, combined-proof reuse, failure contamination, split cost, and time
-to isolate the minimal failing dependency-closed subset.
+to isolate the minimal failing dependency-closed subset. Bisection uses the
+registered flake policy: a failure is attributed only when it reproduces under
+the rerun criterion, which is also what makes the minimal failing subset
+well-defined. The failure-contamination bound is registered before the phase
+begins, and the first deliberate forge canary — one merged pull request per
+minute sustained for sixty minutes — runs at this phase's entry to validate
+the forge capacity model.
 
 **Stop condition:** keep batching only where it reduces publication or proof
 pressure without losing identity, dependency order, or failure containment.
@@ -520,30 +571,54 @@ workload shapes through the complete planner and scheduler. Model large-volume
 capacity offline and use smaller real GitHub canaries for forge behavior; do
 not create 10,000 real pull requests.
 
-The directional 10,000/day scenario succeeds when it:
+Each success criterion is labeled by how it is established. **Measured**
+criteria run on the real system or its canary. **Modeled** criteria are
+predictions of the registered capacity model, valid only within its
+extrapolation cap of the largest validating canary. **Imported** criteria are
+earlier phases' evidence restated at target-volume exposure; Phase 7 adds no
+proof of its own for them.
 
-- sustains an average 6.94 accepted logical changes per minute and the
-  registered burst profile with positive headroom at every constrained
-  resource;
-- keeps queue depth, oldest-ready age, p95/p99 ready-to-canonical latency, and
-  post-burst drain time within their registered bounds;
-- achieves the required publication compression in the hot-repository shape;
-- keeps p95 protected feedback within the `TESTING.md` target;
-- stays within the registered full-suite-equivalent compute budget per accepted
-  logical change and completed parent outcome;
-- stays within the registered maintainer-intervention and human-minute budgets;
-- meets the registered affectedness and admission safety bounds at their stated
-  confidence and workload coverage;
-- shows no worse broken-`main` or rollback rate than the baseline;
-- survives scheduler restart, cache loss, and a failing shared-core change;
-- keeps unrelated component lanes moving during localized failures; and
-- reports every logical change, proof result, batch membership, and publication
-  outcome without silent loss.
+The directional 10,000/day scenario succeeds when:
+
+**Measured, on the real system and canaries:**
+
+- p95 protected PR feedback stays within the `TESTING.md` target, and the
+  admission-latency SLO — ready-to-canonical p95/p99 over merge-group and
+  batch builds — stays within its ratcheted bounds (two SLOs over two distinct
+  run populations);
+- the canary survives scheduler restart, cache loss, and a failing shared-core
+  change within the registered recovery bounds;
+- unrelated component lanes keep accepting changes during localized failures;
+  and
+- every logical change, proof result, batch membership, and publication
+  outcome reconciles dual-entry: the count published per the Beads publication
+  mapping equals the count derived independently from forge history.
+
+**Modeled, by the registered capacity model within its extrapolation cap:**
+
+- sustained 6.94 accepted logical changes per minute and the registered burst
+  profile with positive headroom at every resource, measured or modeled;
+- queue depth, oldest-ready age, ready-to-canonical tails, and post-burst
+  drain within their registered bounds;
+- the registered publication-compression target in the hot-repository shape,
+  with the failure-contamination bound holding alongside it; and
+- the FSE compute ratchet and the intervention ratchet, with per-change rates
+  taken from canary measurement and scaled by the model.
+
+**Imported, restated at exposure:**
+
+- the Phase 2 and Phase 5 affectedness and admission bounds at their stated
+  confidence and workload coverage, with expected escapes per day recomputed
+  at target volume and re-accepted; and
+- a broken-`main` and rollback rate no worse than baseline on the canary, with
+  the model's failure assumptions calibrated from the baseline rather than fit
+  to the result.
 
 This scenario is evidence about the architecture's future headroom, not a claim
 that today's workload needs 10,000 changes or that every deployment must clear
 that volume before it can ship. The safety, truthfulness, and bounded-queue
-outcomes remain requirements at every operating scale.
+outcomes remain requirements at every operating scale, and the modeled
+criteria are claims about the model, disclosed as such.
 
 ## 7. The practical architecture
 
@@ -603,22 +678,27 @@ the facts used for admission.
 1. Define the Beads projection for parent outcomes and logical changes, then
    extend existing telemetry through candidates, proofs, batches, and canonical
    publication.
-2. Add small-change and blast-radius guidance to the development formulas used
+2. Keep the bounds ledger ([`0001-bounds.toml`](0001-bounds.toml)) current:
+   the initial burst basis, shape mix, compression target, ratchets, safety,
+   flake, and model values are registered; re-derive them at each sustained
+   volume doubling and keep the guard test green.
+3. Add small-change and blast-radius guidance to the development formulas used
    by Gas City agents.
-3. Build the initial component and dependency model from authoritative package
+4. Build the initial component and dependency model from authoritative package
    and build graphs plus explicit contracts; run affectedness in shadow mode
    with `shared` as the fail-closed fallback.
-4. Inventory required contexts and add `merge_group` support to every required
+5. Inventory required contexts and add `merge_group` support to every required
    workflow, then canary the ruleset migration with an operator rollback path.
-5. Pilot dependency-aware batching in the hot-repository shape, preserving
+6. Pilot dependency-aware batching in the hot-repository shape, preserving
    logical identity and isolating minimal failing subsets.
-6. Define one bounded change class for declarative admission and run its policy
+7. Define one bounded change class for declarative admission and run its policy
    in shadow mode with explicit proofs and fail-closed escalation.
-7. Run a Pants shadow pilot only if the audited affectedness model remains a
+8. Run a Pants shadow pilot only if the audited affectedness model remains a
    material source of excess work.
-8. Add a shared action-cache pilot only after a selected client can produce
+9. Add a shared action-cache pilot only after a selected client can produce
    exact keys and authorization between trust domains is defined.
-9. Run the combined directional 10,000/day scenario, publish the measurements,
+10. Run the combined directional 10,000/day scenario with each criterion
+    labeled measured, modeled, or imported, publish the measurements,
    and choose the smallest stack that keeps queues bounded with positive
    headroom.
 
