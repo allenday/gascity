@@ -697,11 +697,16 @@ func requireNoLeakedDoltAfterWithFilterAndKiller(t testReporter, enumerate func(
 		for _, pid := range pids {
 			rep = append(rep, fmt.Sprintf("  pid=%d argv=%q", pid, leaked[pid]))
 		}
-		t.Errorf("test leaked %d dolt sql-server process(es); ensure cleanup paths reach shutdownBeadsProvider, or call clearInheritedBeadsEnv to prevent inherited GC_BEADS=bd from triggering gc-beads-bd.sh:\n%s",
+		msg := fmt.Sprintf("test leaked %d dolt sql-server process(es); ensure cleanup paths reach shutdownBeadsProvider, or call clearInheritedBeadsEnv to prevent inherited GC_BEADS=bd from triggering gc-beads-bd.sh:\n%s",
 			len(leaked), strings.Join(rep, "\n"))
-		for _, err := range reapDoltLeakPIDsWithKiller(pids, killFn) {
-			t.Errorf("test leaked dolt cleanup failed: %v", err)
+		if reapErrs := reapDoltLeakPIDsWithKiller(pids, killFn); len(reapErrs) > 0 {
+			cleanupLines := make([]string, len(reapErrs))
+			for i, err := range reapErrs {
+				cleanupLines[i] = err.Error()
+			}
+			msg += fmt.Sprintf("\ntest leaked dolt cleanup failed:\n  %s", strings.Join(cleanupLines, "\n  "))
 		}
+		t.Errorf("%s", msg)
 	})
 }
 

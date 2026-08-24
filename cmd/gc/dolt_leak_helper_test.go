@@ -376,7 +376,14 @@ func TestRequireNoLeakedDoltAfterWithFilterReportsKillErrors(t *testing.T) {
 	})
 	inner.runCleanups()
 
-	msg := strings.Join(inner.errors, "\n")
+	// The leak report and the reap failure must land in a single combined
+	// Errorf, not two separate calls — a duplicate-Errorf regression here
+	// previously blocked the fast gates (ga-7ejnwe).
+	if len(inner.errors) != 1 {
+		t.Fatalf("leak report and kill failure must be combined into one Errorf, got %d: %v",
+			len(inner.errors), inner.errors)
+	}
+	msg := inner.errors[0]
 	if !strings.Contains(msg, "test leaked 1 dolt sql-server") {
 		t.Fatalf("error missing leak report; got %q", msg)
 	}
