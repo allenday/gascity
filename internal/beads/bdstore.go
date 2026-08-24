@@ -66,7 +66,16 @@ func ExecCommandRunner() CommandRunner {
 // applies the provided environment overrides. Explicit keys replace any
 // inherited values from the parent process.
 func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
-	return execCommandRunnerWithEnv(context.Background(), env)
+	return execCommandRunnerWithEnv(context.Background(), env, false)
+}
+
+// ExecCommandRunnerWithEnvWithoutAmbientBeads returns a CommandRunner whose
+// inherited environment excludes the complete BEADS_* namespace before the
+// explicit overrides are applied. Hosted workspace bindings use this so a
+// parent-shell variable added by a newer beads release cannot repoint the
+// selected workspace or replace its credential command.
+func ExecCommandRunnerWithEnvWithoutAmbientBeads(env map[string]string) CommandRunner {
+	return execCommandRunnerWithEnv(context.Background(), env, true)
 }
 
 // ExecCommandRunnerWithEnvContext is like ExecCommandRunnerWithEnv but binds
@@ -75,10 +84,16 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 // budget (for example the claim-time gc.current_run_id decoration) use this so a
 // slow or stuck bd child cannot outlast that budget.
 func ExecCommandRunnerWithEnvContext(ctx context.Context, env map[string]string) CommandRunner {
-	return execCommandRunnerWithEnv(ctx, env)
+	return execCommandRunnerWithEnv(ctx, env, false)
 }
 
-func execCommandRunnerWithEnv(parent context.Context, env map[string]string) CommandRunner {
+// ExecCommandRunnerWithEnvContextWithoutAmbientBeads is the context-bound
+// form of ExecCommandRunnerWithEnvWithoutAmbientBeads.
+func ExecCommandRunnerWithEnvContextWithoutAmbientBeads(ctx context.Context, env map[string]string) CommandRunner {
+	return execCommandRunnerWithEnv(ctx, env, true)
+}
+
+func execCommandRunnerWithEnv(parent context.Context, env map[string]string, withoutAmbientBeads bool) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		execName := name
 		if name == "bd" {
@@ -110,7 +125,18 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
-		cmd.Env = execEnvFor(name, processEnvSnapshotExcludingNativeDoltOpen(), env)
+		baseEnv := processEnvSnapshotExcludingNativeDoltOpen()
+		overrides := env
+		if withoutAmbientBeads {
+			baseEnv = envWithoutPrefix(baseEnv, beadsEnvPrefix)
+			overrides = maps.Clone(env)
+			for key, value := range overrides {
+				if strings.HasPrefix(key, beadsEnvPrefix) && value == "" {
+					delete(overrides, key)
+				}
+			}
+		}
+		cmd.Env = execEnvFor(name, baseEnv, overrides)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -732,6 +758,21 @@ func envWithout(environ []string, key string) []string {
 	return out
 }
 
+// envWithoutPrefix returns a copy of environ without variables whose names
+// begin with prefix. Matching stops at the first '=' so a value containing the
+// prefix is never mistaken for a variable name.
+func envWithoutPrefix(environ []string, prefix string) []string {
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && strings.HasPrefix(key, prefix) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 func mergeEnv(environ []string, overrides map[string]string) []string {
 	if len(overrides) == 0 {
 		return append([]string(nil), environ...)
@@ -786,6 +827,14 @@ func (r *bdRevision) UnmarshalJSON(data []byte) error {
 	token := bytes.TrimSpace(data)
 	if len(token) == 0 {
 		return errors.New("bd revision is empty")
+	}
+	// A JSON null revision means the row has no recorded token yet (legacy rows,
+	// or a backend that has not minted one). Decode it as the zero token — the
+	// same "no revision" sentinel a never-mutated bead carries — rather than
+	// failing the whole issue decode on strconv.ParseInt("null").
+	if string(token) == "null" {
+		*r = 0
+		return nil
 	}
 
 	decimal := string(token)
@@ -1400,10 +1449,12 @@ func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		}
 		s.latchConditionalReleaseUnsupported()
 	}
-	// Only the fallback needs a minted fence. The verb path runs bd's own
-	// mutation, which rewrites row_lock itself; `bd sql` does not, so a release
-	// written as raw SQL would leave the revision untouched and be invisible to
-	// every revision-fenced reader.
+	// The raw-SQL fallback writes the row itself, so it also has to mint the
+	// fresh revision bd's verb path mints for us: a release that left the
+	// pre-release token in place would keep a stale fence current. The verb path
+	// runs bd's own mutation, which rewrites the row lock itself; `bd sql` does
+	// not, so a release written as raw SQL would otherwise leave the revision
+	// untouched and be invisible to every revision-fenced reader.
 	revision, err := newRevisionToken()
 	if err != nil {
 		return false, fmt.Errorf("bd release-if-current: minting revision: %w", err)
@@ -1417,15 +1468,20 @@ func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		" WHERE id = " + bdSQLStringLiteral(id) +
 		" AND status = 'in_progress'" +
 		" AND assignee = " + bdSQLStringLiteral(expectedAssignee)
-	args := s.bdTransientWriteArgs([]string{"sql", "--json", query})
-	out, err := s.runner(s.dir, "bd", args...)
-	if err != nil && !isBdTransientWriteError(err) {
+	// Retry ordinary serialization conflicts, but never replay an ambiguous
+	// write: a revision-aware release mints a fresh token and matches on
+	// status+assignee, so replaying one that may already have committed could
+	// stomp a same-assignee reclaim that landed in between — reinstating the
+	// release token over the reclaim's. runBDTransientReleaseOutput draws that
+	// line; a single-attempt raw runner would instead surface every transient
+	// blip as a spurious release failure.
+	out, err := s.runBDTransientReleaseOutput("sql", "--json", query)
+	if err != nil {
 		if isBdSQLUnsupportedInEmbeddedMode(err) {
 			return s.releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee, revision)
 		}
 		if isMissingRevisionColumn(err) {
-			args = s.bdTransientWriteArgs([]string{"sql", "--json", legacyQuery})
-			out, err = s.runner(s.dir, "bd", args...)
+			out, err = s.runBDTransientReleaseOutput("sql", "--json", legacyQuery)
 		}
 	}
 	if err != nil {
@@ -2184,6 +2240,19 @@ func (s *BdStore) runBDTransientCreateOutput(hasStableID bool, args ...string) (
 			return false
 		}
 		return hasStableID || !isBdAmbiguousWriteError(err)
+	}, args...)
+}
+
+// runBDTransientReleaseOutput runs a revision-aware release UPDATE, retrying
+// ordinary serialization conflicts but never replaying an ambiguous write.
+// Unlike a create there is no stable id to make the write idempotent: the
+// release matches on status+assignee and installs a fresh token, so replaying
+// one that may already have committed could stomp a same-assignee reclaim that
+// landed in between. Same ambiguity guard as an id-less create, named for the
+// release path it protects.
+func (s *BdStore) runBDTransientReleaseOutput(args ...string) ([]byte, error) {
+	return s.runBDTransientWriteOutputWhen(func(err error) bool {
+		return isBdTransientWriteError(err) && !isBdAmbiguousWriteError(err)
 	}, args...)
 }
 

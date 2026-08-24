@@ -823,7 +823,10 @@ gc context add <name> [flags]
 |------|------|---------|-------------|
 | `--ca-file` | string |  | PEM CA bundle to verify the server certificate |
 | `--city` | string |  | remote city name (default: &lt;name&gt;) |
+| `--credential-audience` | string |  | credential provider audience (provider mode) |
 | `--credential-command` | string |  | command that mints a transport bearer (edge/proxy fronted) |
+| `--credential-org` | string |  | optional credential provider organization (provider mode) |
+| `--credential-required-scopes` | string |  | JSON array of required credential scopes (provider mode) |
 | `--grant-command` | string |  | command that mints an X-GC-City-Write grant (direct hardened self-host) |
 | `--insecure-skip-verify` | bool |  | skip TLS verification (dev only) |
 | `--timeout` | string |  | REST request timeout, e.g. 120s (never applied to SSE streams) |
@@ -3561,6 +3564,7 @@ gc rig add /path/to/existing --adopt
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
+| `--allow-ephemeral` | bool |  | register the rig even though its path is on a filesystem that does not survive a restart |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from origin/HEAD or current branch) |
 | `--git-url` | string |  | git URL to clone into a new rig on a REMOTE city (server-side provisioning) |
 | `--include` | stringArray |  | pack source or pack name for rig agents (repeatable; writes canonical rig imports) |

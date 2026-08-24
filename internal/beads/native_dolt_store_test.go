@@ -1299,6 +1299,62 @@ func TestNativeDoltStoreCloseWithMetadataIfMatchReturnsZeroAfterRetryExhaustion(
 	}
 }
 
+// DeleteIfMatch runs its fence check and delete inside one transaction, so a
+// serialization conflict must replay the WHOLE transaction — re-reading the row
+// version each attempt — exactly like the close path. Retrying only the delete
+// would fence against a RowVersion the rolled-back read already invalidated.
+func TestNativeDoltStoreDeleteIfMatchRetriesWholeTransaction(t *testing.T) {
+	for _, conflict := range []error{
+		errors.New("Error 1213 (40001): deadlock"),
+		errors.New("Error 1205 (HY000): lock wait timeout exceeded"),
+	} {
+		t.Run(conflict.Error(), func(t *testing.T) {
+			storage := &retryingNativeDoltStorage{
+				nativeDoltMemStorage: newNativeDoltMemStorage(),
+				txErrors:             []error{conflict},
+			}
+			store := newNativeDoltStoreForTest(storage)
+			created, err := store.Create(Bead{Title: "retry whole delete transaction"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			if err := store.DeleteIfMatch(created.ID, created.Revision); err != nil {
+				t.Fatalf("DeleteIfMatch: %v", err)
+			}
+			if storage.txCalls != 2 {
+				t.Fatalf("RunInTransaction calls = %d, want 2", storage.txCalls)
+			}
+			if _, err := store.Get(created.ID); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("Get after replayed delete = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
+// An ambiguous failure — one that may have committed — must NOT replay a delete,
+// or a delete that already applied would run again against a moved fence. This
+// pins the same transient/ambiguous split the close path draws.
+func TestNativeDoltStoreDeleteIfMatchDoesNotRetryAmbiguousFailure(t *testing.T) {
+	sentinel := errors.New("connection reset by peer")
+	storage := &retryingNativeDoltStorage{
+		nativeDoltMemStorage: newNativeDoltMemStorage(),
+		txErrors:             []error{sentinel},
+	}
+	store := newNativeDoltStoreForTest(storage)
+	created, err := store.Create(Bead{Title: "ambiguous delete"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := store.DeleteIfMatch(created.ID, created.Revision); !errors.Is(err, sentinel) {
+		t.Fatalf("DeleteIfMatch error = %v, want %v", err, sentinel)
+	}
+	if storage.txCalls != 1 {
+		t.Fatalf("RunInTransaction calls = %d, want 1", storage.txCalls)
+	}
+}
+
 func TestNativeDoltStoreReadyFiltersGasCityExcludedTypesBeforeLimit(t *testing.T) {
 	storage := &nativeDoltStorageSpy{
 		getReadyWork: func(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
@@ -2175,6 +2231,99 @@ func TestProcessEnvSnapshotWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
 	}
 }
 
+func TestProcessEnvSnapshotWaitsForWholeBeadsNamespaceRestore(t *testing.T) {
+	t.Setenv("BEADS_FUTURE_AUTHORITY", "ambient-authority")
+	restoreEnv, err := withWithheldBeadsEnv()
+	if err != nil {
+		t.Fatalf("withWithheldBeadsEnv: %v", err)
+	}
+	restored := false
+	t.Cleanup(func() {
+		if !restored {
+			restoreEnv()
+		}
+	})
+
+	envCh := make(chan []string, 1)
+	go func() {
+		envCh <- ProcessEnvSnapshotExcludingNativeDoltOpen()
+	}()
+	select {
+	case env := <-envCh:
+		t.Fatalf("process env snapshot completed while BEADS_ was withheld: %v", envValues(env, "BEADS_FUTURE_AUTHORITY"))
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	restoreEnv()
+	restored = true
+	select {
+	case env := <-envCh:
+		if got := envValues(env, "BEADS_FUTURE_AUTHORITY"); len(got) != 1 || got[0] != "ambient-authority" {
+			t.Fatalf("BEADS_FUTURE_AUTHORITY after restore = %v, want [ambient-authority]", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("process env snapshot did not complete after the BEADS_ namespace was restored")
+	}
+}
+
+func TestOrdinaryNativeOpenWaitsForWholeBeadsNamespaceRestore(t *testing.T) {
+	t.Setenv("BEADS_FUTURE_AUTHORITY", "ambient-authority")
+	restoreEnv, err := withWithheldBeadsEnv()
+	if err != nil {
+		t.Fatalf("withWithheldBeadsEnv: %v", err)
+	}
+	restored := false
+	t.Cleanup(func() {
+		if !restored {
+			restoreEnv()
+		}
+	})
+
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	seen := make(chan string, 1)
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		seen <- os.Getenv("BEADS_FUTURE_AUTHORITY")
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gc", nil },
+		}, nil
+	}
+
+	openDone := make(chan error, 1)
+	scopeRoot := t.TempDir()
+	go func() {
+		store, openErr := OpenNativeDoltStoreAt(context.Background(), scopeRoot, nil)
+		if store != nil {
+			_ = store.CloseStore()
+		}
+		openDone <- openErr
+	}()
+	select {
+	case got := <-seen:
+		t.Fatalf("ordinary native open ran while BEADS_ was withheld (saw %q)", got)
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	restoreEnv()
+	restored = true
+	select {
+	case got := <-seen:
+		if got != "ambient-authority" {
+			t.Fatalf("ordinary native open saw BEADS_FUTURE_AUTHORITY=%q, want ambient-authority", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ordinary native open did not continue after the BEADS_ namespace was restored")
+	}
+	select {
+	case err := <-openDone:
+		if err != nil {
+			t.Fatalf("OpenNativeDoltStoreAt: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ordinary native open did not return")
+	}
+}
+
 // TestAmbientNativeDoltOpenEnvWaitsForNativeDoltOpenEnvRestore proves the guarded
 // single-key ambient read serializes with an in-flight native Dolt open. A native
 // open for a non-external scope unsets BEADS_DOLT_SERVER_TLS under nativeDoltOpenEnvMu
@@ -2474,9 +2623,11 @@ type nativeDoltStorageSpy struct {
 	createIssues                func(context.Context, []*beadslib.Issue, string) error
 	getIssue                    func(context.Context, string) (*beadslib.Issue, error)
 	updateIssue                 func(context.Context, string, map[string]interface{}, string) error
+	updateIssueChecked          func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error
 	runInTransaction            func(context.Context, string, func(beadslib.Transaction) error) error
 	reopenIssue                 func(context.Context, string, string, string) error
 	closeIssue                  func(context.Context, string, string, string, string) error
+	closeIssueChecked           func(context.Context, string, string, beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error)
 	deleteIssue                 func(context.Context, string) error
 	searchIssues                func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error)
 	countIssues                 func(context.Context, string, beadslib.IssueFilter) (int64, error)
@@ -2525,6 +2676,13 @@ func (s *nativeDoltStorageSpy) UpdateIssue(ctx context.Context, id string, updat
 	return s.updateIssue(ctx, id, updates, actor)
 }
 
+func (s *nativeDoltStorageSpy) UpdateIssueChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts beadslib.UpdateIssueOptions) error {
+	if s.updateIssueChecked == nil {
+		return nil
+	}
+	return s.updateIssueChecked(ctx, id, updates, actor, opts)
+}
+
 func (s *nativeDoltStorageSpy) RunInTransaction(ctx context.Context, commitMsg string, fn func(beadslib.Transaction) error) error {
 	if s.runInTransaction != nil {
 		return s.runInTransaction(ctx, commitMsg, fn)
@@ -2544,6 +2702,13 @@ func (s *nativeDoltStorageSpy) CloseIssue(ctx context.Context, id string, reason
 		return nil
 	}
 	return s.closeIssue(ctx, id, reason, actor, session)
+}
+
+func (s *nativeDoltStorageSpy) CloseIssueChecked(ctx context.Context, id string, actor string, opts beadslib.CloseIssueOptions) (beadslib.CloseIssueResult, error) {
+	if s.closeIssueChecked == nil {
+		return beadslib.CloseIssueResult{}, nil
+	}
+	return s.closeIssueChecked(ctx, id, actor, opts)
 }
 
 func (s *nativeDoltStorageSpy) DeleteIssue(ctx context.Context, id string) error {
@@ -3187,6 +3352,48 @@ func TestOpenNativeDoltStoreAtWithoutAmbientEnvWithholdsTheWholeNamespace(t *tes
 	}
 	// Withheld for the open, not for the process: a caller that shares this
 	// process must find its environment exactly as it left it.
+	if got := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND"); got != "/poison/credential-command" {
+		t.Errorf("BEADS_DOLT_CREDENTIAL_COMMAND after the open = %q, want the ambient value restored", got)
+	}
+	if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "ambient.example.com" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST after the open = %q, want the ambient value restored", got)
+	}
+}
+
+func TestOpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommandProjectsOnlyTheSelectedCommand(t *testing.T) {
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "/poison/credential-command")
+	t.Setenv("BEADS_DB", "/poison/db")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+
+	var seen map[string]string
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		seen = map[string]string{}
+		for _, key := range []string{"BEADS_DOLT_CREDENTIAL_COMMAND", "BEADS_DB", "BEADS_DOLT_SERVER_HOST"} {
+			seen[key] = os.Getenv(key)
+		}
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gcg", nil },
+		}, nil
+	}
+
+	store, err := OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(
+		context.Background(), filepath.Join(t.TempDir(), "scope"), "/selected/gc internal beads-credential")
+	if err != nil {
+		t.Fatalf("OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand: %v", err)
+	}
+	if err := store.CloseStore(); err != nil {
+		t.Fatalf("CloseStore: %v", err)
+	}
+	if got := seen["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != "/selected/gc internal beads-credential" {
+		t.Errorf("BEADS_DOLT_CREDENTIAL_COMMAND during the open = %q, want the selected command", got)
+	}
+	for _, key := range []string{"BEADS_DB", "BEADS_DOLT_SERVER_HOST"} {
+		if got := seen[key]; got != "" {
+			t.Errorf("%s = %q during the open, want withheld", key, got)
+		}
+	}
 	if got := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND"); got != "/poison/credential-command" {
 		t.Errorf("BEADS_DOLT_CREDENTIAL_COMMAND after the open = %q, want the ambient value restored", got)
 	}
