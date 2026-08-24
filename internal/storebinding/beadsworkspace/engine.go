@@ -72,7 +72,17 @@ func (p *workspaceProvider) OpenEngine(spec storebinding.BindingSpec, classes st
 	// city that inherited it never chose that. Withholding the namespace
 	// rather than a key list is deliberate: the list of variables the linked
 	// library reads is the library's to grow.
-	store, err := beads.OpenNativeDoltStoreAtWithoutAmbientEnv(context.Background(), p.root)
+	//
+	// Fenced to the namespaces the assigned classes hold, from the same
+	// derivation the SQLite provider uses — the pinned-id contract in
+	// engdocs/architecture/beads.md, invariant 16. The prefix check below only
+	// proves what this workspace MINTS; without the fence a caller-pinned id
+	// from any namespace still lands here, and one foreign bead makes the
+	// binding's claim false while leaving that bead unreachable by every
+	// id-shaped lookup of the namespace it actually sits in.
+	store, err := beads.OpenNativeDoltStoreAtWithoutAmbientEnv(context.Background(), p.root,
+		beads.WithNativeDoltStoreReservedIDPrefixes(storebinding.EngineReservedPrefixes(classes)...),
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening the workspace of binding %q at %s through the linked beads library: %w", p.spec.Name, p.root, err)
 	}
