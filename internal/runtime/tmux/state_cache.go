@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -73,6 +74,11 @@ type runtimeStateSnapshot struct {
 	ProcessesAvailable bool
 }
 
+type exactProcessScan struct {
+	runtimes []runtime.LiveRuntime
+	complete bool
+}
+
 // StateCache caches tmux runtime state to avoid spawning N subprocess calls per
 // status check or reconciler pass. Concurrent callers are coalesced via
 // singleflight so at most one tmux/process snapshot refresh runs at a time.
@@ -104,9 +110,10 @@ func NewStateCache(fetcher StateFetcher, ttl time.Duration) *StateCache {
 		}
 	}
 	return &StateCache{
-		fetcher:  fetcher,
-		ttl:      ttl,
-		staleTTL: defaultStaleTTL,
+		fetcher:         fetcher,
+		ttl:             ttl,
+		staleTTL:        defaultStaleTTL,
+		scanBySessionID: scanBySessionID,
 	}
 }
 
