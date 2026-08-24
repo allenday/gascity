@@ -30,6 +30,15 @@ cross_repo = 0.10
 compression_min_changes_per_pr = 10
 forge_headroom = 0.30
 basis = "GitHub recommendation of 1 merged PR/min and 6 pushes/min per repository (docs: repository-limits); 6.94/(1-0.30) = 9.9, rounded up"
+batch_merge_structure = "single-change publications may squash; a multi-change batch publishes as a merge commit carrying one rebased commit per logical change in dependency order; batches are never squashed"
+batch_overlap = "changes touching the same hunks share a batch only when dependency-related; a dependency-closed subgraph reverts as a unit or not at all"
+
+[admission]
+coverage_min_at_500_per_day = 0.5
+coverage_min_at_2000_per_day = 0.9
+coverage_min_at_10000_per_day = 0.99
+exception_rate_max = 0.005
+human_touch_budget = "daily budget of routine reviews + exceptions + interventions, registered from Phase 0 measured team capacity; sustained volume growth is gated on staying inside it"
 
 [compute]
 fse_pin_sha = "4460d7de282063dd861a8d17fa9559858a538046"

@@ -328,6 +328,25 @@ Independent component lanes matter as much as batch size. A failure in one
 component should not block unrelated changes elsewhere. Shared-core changes
 enter the broader lane whose dependents they invalidate.
 
+The publication commit structure is part of the identity contract, and it is
+registered rather than assumed. A single-change publication may squash: one
+logical change, one canonical commit, identity trivially preserved. A
+multi-change batch publishes as a merge commit whose first-parent chain
+carries one rebased commit per logical change in dependency order, so every
+logical change ID maps to exactly one canonical SHA and `git revert` of one
+mid-batch commit is the default repair path. Batches are never squashed:
+squashing collapses the batch to a single commit and degrades selective
+repair to patch reconstruction. The repository ruleset already permits both
+merge methods, so this is publication policy, not new forge machinery.
+
+Selective revert also has an honest limit, and the batcher enforces it
+rather than papering over it: changes that touch the same hunks share a
+batch only when they are dependency-related, and a dependency-closed
+subgraph reverts as a unit or not at all. Where a clean revert is impossible,
+forward repair from the recorded patch is the fallback, and the publication
+record states which repair path each logical change actually has instead of
+promising one it does not.
+
 ### 4.2 Keep humans off routine happy paths
 
 Ten thousand changes per day cannot require ten thousand human approvals. For a
@@ -344,8 +363,39 @@ broad blast radius fails closed into human review. Humans govern the policy,
 audit samples, and handle exceptions.
 
 Expand automated admission one audited change class at a time. Track its
-escalation rate, escaped-defect rate, rollback rate, and human minutes per
+escalation rate, escaped-defect rate, rollback rate, and human touches per
 accepted change.
+
+The arithmetic makes admission coverage the load-bearing number, so the
+design states it instead of implying it. At the registered compression
+target, the directional horizon is roughly 1,000 publication transactions
+per day; if each crossed a human reviewer at even five to fifteen minutes,
+routine review alone would cost 80 to 250 person-hours per day. Routine
+review therefore cannot scale with volume, and the plan must say how fast it
+retires.
+
+Define **admission coverage** as the fraction of accepted logical changes
+admitted by declarative policy without a routine human review. Human work is
+then two streams — the reviewed publications of the uncovered fraction, and
+the exceptions escalated from automated lanes — and both draw down one
+finite, registered daily human-touch budget (routine reviews plus exceptions
+plus interventions), ratcheted from the measured capacity of the actual
+team. That budget is what forces coverage upward: the registered milestones
+require coverage of at least 0.5 before sustained volume passes 500 changes
+per day, 0.9 before 2,000, and 0.99 before the 10,000/day shape, with the
+exception rate under its registered bound and the stricter auto-admission
+miss bound holding throughout. Volume growth that would breach the touch
+budget waits for coverage, not the reverse.
+
+Coverage expands class by class. Inventory change classes by provenance,
+scope, and proof determinism; order them by volume share times proof
+stability, so the classes that buy the most coverage graduate first —
+dependency bumps, generated-file refreshes, and codemod output are the
+plausible front of that queue, and judgment-heavy shared-core work is the
+back. Reviewed lanes are not required to carry the compression target:
+small human-reviewed publications and heavily batched automated lanes
+coexist, because the forge limit binds the publication stream as a whole,
+not each lane — batching optimizes the lanes humans no longer read.
 
 ## 5. Run the smallest truthful proof set
 
@@ -553,7 +603,7 @@ effort.
 
 **Stop condition:** automate only if every admission decision is explained by
 explicit predicates and proofs. Missing or ambiguous evidence must fail closed;
-a high exception rate means the class is not ready.
+an exception rate above the registered bound means the class is not ready.
 
 ### Phase 6: shared cache
 

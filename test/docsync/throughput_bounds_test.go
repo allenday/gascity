@@ -28,7 +28,16 @@ type throughputBounds struct {
 		CompressionMinChangesPerPR int     `toml:"compression_min_changes_per_pr"`
 		ForgeHeadroom              float64 `toml:"forge_headroom"`
 		Basis                      string  `toml:"basis"`
+		BatchMergeStructure        string  `toml:"batch_merge_structure"`
+		BatchOverlap               string  `toml:"batch_overlap"`
 	} `toml:"publication"`
+	Admission struct {
+		CoverageMinAt500PerDay   float64 `toml:"coverage_min_at_500_per_day"`
+		CoverageMinAt2000PerDay  float64 `toml:"coverage_min_at_2000_per_day"`
+		CoverageMinAt10000PerDay float64 `toml:"coverage_min_at_10000_per_day"`
+		ExceptionRateMax         float64 `toml:"exception_rate_max"`
+		HumanTouchBudget         string  `toml:"human_touch_budget"`
+	} `toml:"admission"`
 	Compute struct {
 		FSEPinSHA          string  `toml:"fse_pin_sha"`
 		FloorFSEPerChange  float64 `toml:"floor_fse_per_change"`
@@ -119,6 +128,29 @@ func TestThroughputBoundsLedger(t *testing.T) {
 	}
 	if b.Publication.ForgeHeadroom <= 0 || b.Publication.ForgeHeadroom >= 1 {
 		t.Errorf("publication.forge_headroom = %v: must be a fraction in (0,1)", b.Publication.ForgeHeadroom)
+	}
+	if b.Publication.BatchMergeStructure == "" || b.Publication.BatchOverlap == "" {
+		t.Error("publication.batch_merge_structure and batch_overlap are required: the identity model depends on the publication commit structure")
+	}
+
+	milestones := []float64{
+		b.Admission.CoverageMinAt500PerDay,
+		b.Admission.CoverageMinAt2000PerDay,
+		b.Admission.CoverageMinAt10000PerDay,
+	}
+	for i, m := range milestones {
+		if m <= 0 || m > 1 {
+			t.Errorf("admission coverage milestone %d = %v: must be in (0,1]", i, m)
+		}
+		if i > 0 && m < milestones[i-1] {
+			t.Errorf("admission coverage milestones must be non-decreasing, got %v", milestones)
+		}
+	}
+	if b.Admission.ExceptionRateMax <= 0 || b.Admission.ExceptionRateMax >= 1 {
+		t.Errorf("admission.exception_rate_max = %v: must be a rate in (0,1)", b.Admission.ExceptionRateMax)
+	}
+	if b.Admission.HumanTouchBudget == "" {
+		t.Error("admission.human_touch_budget is empty: the coverage milestones must name the budget that forces them")
 	}
 
 	if !shaRE.MatchString(b.Compute.FSEPinSHA) {
