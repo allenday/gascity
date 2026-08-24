@@ -331,32 +331,29 @@ func recordExactSessionSleepDrainTrace(
 	if template == "" {
 		template = info.Template
 	}
-	if cycle.detailEnabled(template) {
-		fields := map[string]any{
-			"admission":         string(admission.Source),
-			"admission_version": admission.Version,
-			"generation":        params.Generation,
-			"instance_token":    info.InstanceToken,
-			"drain_reason":      reason,
-			"effect_owner":      detectorKeyedEffectOwner,
-			"effect_applied":    applied,
-		}
-		for k, v := range extra {
-			fields[k] = v
-		}
-		cycle.recordAdmittedDetailOperation(
-			TraceSiteReconcilerDrainDecision,
-			TraceReasonCode(reason),
-			outcome,
-			"exact_session_sleep_drain",
-			template,
-			info.ID,
-			info.SessionNameMetadata,
-			TraceSource(cycle.sourceFor(template)),
-			duration,
-			fields,
-		)
+	fields := map[string]any{
+		"admission":         string(admission.Source),
+		"admission_version": admission.Version,
+		"generation":        params.Generation,
+		"instance_token":    info.InstanceToken,
+		"drain_reason":      reason,
+		"effect_owner":      detectorKeyedEffectOwner,
+		"effect_applied":    applied,
 	}
+	for k, v := range extra {
+		fields[k] = v
+	}
+	cycle.recordKeyedEffect(
+		TraceSiteReconcilerDrainDecision,
+		TraceReasonCode(reason),
+		outcome,
+		"exact_session_sleep_drain",
+		template,
+		info.ID,
+		info.SessionNameMetadata,
+		duration,
+		fields,
+	)
 	if err := cycle.End(TraceCompletionCompleted, nil); err != nil && params.Stderr != nil {
 		fmt.Fprintf(params.Stderr, "session reconciler: recording exact sleep drain trace: %v\n", err) //nolint:errcheck // tracing is observational
 	}

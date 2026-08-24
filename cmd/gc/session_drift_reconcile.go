@@ -761,35 +761,32 @@ func recordExactSessionConfigDriftRecord(
 	if template == "" {
 		template = normalizedSessionTemplateInfo(info, params.Config)
 	}
-	if cycle.detailEnabled(template) {
-		fields := map[string]any{
-			"admission":         string(admission.Source),
-			"admission_version": admission.Version,
-			"generation":        params.Generation,
-			"instance_token":    info.InstanceToken,
-			"drift_half":        string(drift.Half),
-			"stored_hash":       drift.StoredHash,
-			"current_hash":      drift.CurrentHash,
-			"launch_only":       drift.LaunchOnly,
-			"effect_owner":      effectOwner,
-			"effect_applied":    applied,
-		}
-		for k, v := range extra {
-			fields[k] = v
-		}
-		cycle.recordAdmittedDetailOperation(
-			drift.Site,
-			reason,
-			outcome,
-			"exact_session_config_drift_converge",
-			template,
-			info.ID,
-			info.SessionNameMetadata,
-			TraceSource(cycle.sourceFor(template)),
-			0,
-			fields,
-		)
+	fields := map[string]any{
+		"admission":         string(admission.Source),
+		"admission_version": admission.Version,
+		"generation":        params.Generation,
+		"instance_token":    info.InstanceToken,
+		"drift_half":        string(drift.Half),
+		"stored_hash":       drift.StoredHash,
+		"current_hash":      drift.CurrentHash,
+		"launch_only":       drift.LaunchOnly,
+		"effect_owner":      effectOwner,
+		"effect_applied":    applied,
 	}
+	for k, v := range extra {
+		fields[k] = v
+	}
+	cycle.recordKeyedEffect(
+		drift.Site,
+		reason,
+		outcome,
+		"exact_session_config_drift_converge",
+		template,
+		info.ID,
+		info.SessionNameMetadata,
+		0,
+		fields,
+	)
 	if err := cycle.End(TraceCompletionCompleted, nil); err != nil && params.Stderr != nil {
 		fmt.Fprintf(params.Stderr, "session reconciler: recording exact config-drift trace: %v\n", err) //nolint:errcheck // tracing is observational
 	}

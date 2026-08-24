@@ -166,32 +166,29 @@ func recordExactSessionStaleCreateTrace(
 		return
 	}
 	template := normalizedSessionTemplateInfo(info, params.Config)
-	if cycle.detailEnabled(template) {
-		fields := map[string]any{
-			"admission":            string(admission.Source),
-			"admission_version":    admission.Version,
-			"generation":           params.Generation,
-			"instance_token":       info.InstanceToken,
-			"pending_create_claim": strings.TrimSpace(info.PendingCreateClaimMetadata),
-			"effect_owner":         detectorKeyedEffectOwner,
-			"effect_applied":       applied,
-		}
-		for k, v := range extra {
-			fields[k] = v
-		}
-		cycle.recordAdmittedDetailOperation(
-			site,
-			reason,
-			outcome,
-			"exact_session_stale_create_rollback",
-			template,
-			info.ID,
-			info.SessionNameMetadata,
-			TraceSource(cycle.sourceFor(template)),
-			0,
-			fields,
-		)
+	fields := map[string]any{
+		"admission":            string(admission.Source),
+		"admission_version":    admission.Version,
+		"generation":           params.Generation,
+		"instance_token":       info.InstanceToken,
+		"pending_create_claim": strings.TrimSpace(info.PendingCreateClaimMetadata),
+		"effect_owner":         detectorKeyedEffectOwner,
+		"effect_applied":       applied,
 	}
+	for k, v := range extra {
+		fields[k] = v
+	}
+	cycle.recordKeyedEffect(
+		site,
+		reason,
+		outcome,
+		"exact_session_stale_create_rollback",
+		template,
+		info.ID,
+		info.SessionNameMetadata,
+		0,
+		fields,
+	)
 	if err := cycle.End(TraceCompletionCompleted, nil); err != nil && params.Stderr != nil {
 		fmt.Fprintf(params.Stderr, "session reconciler: recording exact stale-create rollback trace: %v\n", err) //nolint:errcheck // tracing is observational
 	}

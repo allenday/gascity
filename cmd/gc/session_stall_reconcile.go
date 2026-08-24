@@ -348,39 +348,36 @@ func recordExactSessionProgressStallTrace(
 		return
 	}
 	template := normalizedSessionTemplateInfo(info, params.Config)
-	if cycle.detailEnabled(template) {
-		reason := detectorReasonProgressStall
-		outcome := TraceOutcomeStop
-		if !applied {
-			outcome = TraceOutcomeSkipped
-			if decision.FloorExempt {
-				reason = detectorReasonProgressStallExempt
-			}
+	reason := detectorReasonProgressStall
+	outcome := TraceOutcomeStop
+	if !applied {
+		outcome = TraceOutcomeSkipped
+		if decision.FloorExempt {
+			reason = detectorReasonProgressStallExempt
 		}
-		cycle.recordAdmittedDetailOperation(
-			TraceSiteReconcilerProgressStallExempt,
-			reason,
-			outcome,
-			"exact_session_progress_stall_recycle",
-			template,
-			info.ID,
-			info.SessionNameMetadata,
-			TraceSource(cycle.sourceFor(template)),
-			duration,
-			map[string]any{
-				"admission":         string(admission.Source),
-				"admission_version": admission.Version,
-				"generation":        params.Generation,
-				"instance_token":    info.InstanceToken,
-				"stall_arm":         string(decision.Arm),
-				"floor_exempt":      decision.FloorExempt,
-				"holds_claim":       decision.HoldsClaim,
-				"idle_gap_seconds":  int64(decision.Gap.Seconds()),
-				"effect_owner":      detectorKeyedEffectOwner,
-				"effect_applied":    applied,
-			},
-		)
 	}
+	cycle.recordKeyedEffect(
+		TraceSiteReconcilerProgressStallExempt,
+		reason,
+		outcome,
+		"exact_session_progress_stall_recycle",
+		template,
+		info.ID,
+		info.SessionNameMetadata,
+		duration,
+		map[string]any{
+			"admission":         string(admission.Source),
+			"admission_version": admission.Version,
+			"generation":        params.Generation,
+			"instance_token":    info.InstanceToken,
+			"stall_arm":         string(decision.Arm),
+			"floor_exempt":      decision.FloorExempt,
+			"holds_claim":       decision.HoldsClaim,
+			"idle_gap_seconds":  int64(decision.Gap.Seconds()),
+			"effect_owner":      detectorKeyedEffectOwner,
+			"effect_applied":    applied,
+		},
+	)
 	if err := cycle.End(TraceCompletionCompleted, nil); err != nil && params.Stderr != nil {
 		fmt.Fprintf(params.Stderr, "session reconciler: recording exact progress-stall recycle trace: %v\n", err) //nolint:errcheck // tracing is observational
 	}

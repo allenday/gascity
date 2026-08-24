@@ -447,32 +447,29 @@ func recordExactSessionDrainTrace(
 	if template == "" {
 		template = info.Template
 	}
-	if cycle.detailEnabled(template) {
-		fields := map[string]any{
-			"admission":         string(admission.Source),
-			"admission_version": admission.Version,
-			"generation":        params.Generation,
-			"instance_token":    info.InstanceToken,
-			"drain_reason":      drainReason,
-			"effect_owner":      detectorKeyedEffectOwner,
-			"effect_applied":    applied,
-		}
-		for k, v := range extra {
-			fields[k] = v
-		}
-		cycle.recordAdmittedDetailOperation(
-			site,
-			reason,
-			outcome,
-			"exact_session_drain_advance",
-			template,
-			info.ID,
-			info.SessionNameMetadata,
-			TraceSource(cycle.sourceFor(template)),
-			duration,
-			fields,
-		)
+	fields := map[string]any{
+		"admission":         string(admission.Source),
+		"admission_version": admission.Version,
+		"generation":        params.Generation,
+		"instance_token":    info.InstanceToken,
+		"drain_reason":      drainReason,
+		"effect_owner":      detectorKeyedEffectOwner,
+		"effect_applied":    applied,
 	}
+	for k, v := range extra {
+		fields[k] = v
+	}
+	cycle.recordKeyedEffect(
+		site,
+		reason,
+		outcome,
+		"exact_session_drain_advance",
+		template,
+		info.ID,
+		info.SessionNameMetadata,
+		duration,
+		fields,
+	)
 	if err := cycle.End(TraceCompletionCompleted, nil); err != nil && params.Stderr != nil {
 		fmt.Fprintf(params.Stderr, "session reconciler: recording exact drain advance trace: %v\n", err) //nolint:errcheck // tracing is observational
 	}

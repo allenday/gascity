@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 
@@ -491,5 +492,96 @@ func TestExactZombieMarkRefusesUnclassifiableScrollback(t *testing.T) {
 	if countRecordedEvents(rec, events.SessionCrashed) != 1 {
 		t.Fatalf("SessionCrashed events = %d, want exactly 1 (legacy fires it outside the reason check)",
 			countRecordedEvents(rec, events.SessionCrashed))
+	}
+}
+
+// zombieUnarmedTraceRecords drives the keyed zombie handler against a city whose
+// trace detail is UNARMED — the shipping default, and the only configuration a
+// released opt-in reconciler is observed in — and returns everything that
+// survived to the trace store, plus the session it acted on.
+//
+// peek is the fixture's scrollback: a classifiable terminal error licenses the
+// mark and the handler APPLIES an effect; anything else leaves the row untouched
+// and the handler only refuses.
+func zombieUnarmedTraceRecords(t *testing.T, peek string) ([]SessionReconcilerTraceRecord, string) {
+	t.Helper()
+	env := newReconcilerTestEnv()
+	env.cfg = zombieTestConfig()
+	provider := &unattendedStopProvider{Fake: env.sp}
+	bead := seedZombieSession(t, env, peek)
+
+	in := zombieSweepInput(env, provider, env.sessionInfo(bead.ID), env.clk.Now(), nil)
+	result := detectSessionConditions(context.Background(), in)
+
+	cityPath := t.TempDir()
+	trace := newSessionReconcilerTraceManager(cityPath, "test-city", io.Discard)
+	t.Cleanup(func() { _ = trace.Close() })
+
+	params := zombieHandlerParams(env, provider, events.NewFake(), result.Liveness)
+	params.CityPath = cityPath
+	params.Trace = trace
+
+	info, response := strandedAuthoritative(t, env, bead.ID)
+	handled, _, err := reconcileExactSessionDetectorFamily(
+		context.Background(),
+		sessionStartAdmission{SessionID: bead.ID, Source: sessionStartAdmissionZombieMark, Version: 1},
+		params, info, response, env.clk,
+	)
+	if err != nil {
+		t.Fatalf("keyed zombie mark on an unarmed city: %v", err)
+	}
+	if !handled {
+		t.Fatal("handler dispatch did not claim the zombie key")
+	}
+
+	records, readErr := ReadTraceRecords(traceCityRuntimeDir(cityPath), TraceFilter{})
+	if readErr != nil {
+		t.Fatalf("read unarmed trace store: %v", readErr)
+	}
+	return records, bead.ID
+}
+
+// TestKeyedAppliedEffectPersistsOnAnUnarmedFleet is ga-f7v2ft.161's RED. An
+// APPLIED effect record is the load-bearing proof that the opt-in keyed engine
+// acted on a row — the answer to "how do I know the opt-in is working?" — and it
+// used to be detail-gated like every other thing a handler emits, so a fleet
+// that armed nothing threw the proof away as it was written. The 2026-08-24 soak
+// census measured the ratio the gate exists for: 59,486 condition records in the
+// window against a handful of applied effects, 59,447 of them discarded.
+//
+// So the APPLIED record, and only the APPLIED record, moves to the always-on
+// tier — the treatment pool_allocation.materialize already gets from
+// RecordControllerOperation. The control is the same handler on the same fixture
+// with nothing to classify: it applies nothing, stays gated, and leaves no
+// record behind. Lifting the effect must not lift the volume with it.
+func TestKeyedAppliedEffectPersistsOnAnUnarmedFleet(t *testing.T) {
+	records, sessionID := zombieUnarmedTraceRecords(t, "model_not_found: gpt-5.3-codex-spark")
+
+	var applied []SessionReconcilerTraceRecord
+	for _, record := range records {
+		if record.SiteCode == TraceSiteReconcilerTerminalProviderError {
+			applied = append(applied, record)
+		}
+	}
+	if len(applied) != 1 {
+		t.Fatalf("keyed applied-effect records on an unarmed city = %d, want exactly 1 (records=%#v)", len(applied), records)
+	}
+	effect := applied[0]
+	if effect.Fields["effect_owner"] != detectorKeyedEffectOwner || effect.Fields["effect_applied"] != true {
+		t.Fatalf("applied effect = %#v, want the keyed ownership stamp and an honest applied flag", effect)
+	}
+	if effect.TraceMode != TraceModeBaseline || effect.TraceSource != TraceSourceAlwaysOn {
+		t.Fatalf("applied effect tier = %q/%q, want baseline/always_on", effect.TraceMode, effect.TraceSource)
+	}
+	if effect.SessionBeadID != sessionID || effect.Template != zombieTestTemplate {
+		t.Fatalf("applied effect identity = %q/%q, want %q/%q: an always-on record still has to join per-session",
+			effect.SessionBeadID, effect.Template, sessionID, zombieTestTemplate)
+	}
+
+	refusals, _ := zombieUnarmedTraceRecords(t, "just some ordinary scrollback")
+	for _, record := range refusals {
+		if record.SiteCode == TraceSiteReconcilerTerminalProviderError {
+			t.Fatalf("an unapplied keyed refusal escaped the detail gate on an unarmed city: %#v", record)
+		}
 	}
 }
