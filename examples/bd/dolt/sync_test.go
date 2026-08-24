@@ -31,6 +31,34 @@ func syncFilteredEnv() []string {
 	)
 }
 
+// runSync runs the sync script's CLI-mode path against a fake dolt CLI
+// already installed in binDir for the city rooted at cityPath, with extraEnv
+// appended after the standard CLI-mode env (GC_DOLT_PORT=1 so the script
+// cannot reach a SQL server and falls back to the dolt CLI), and returns
+// combined output plus the command's error so callers that must assert the
+// sync itself failed (as opposed to merely producing unexpected output) can
+// do so.
+func runSync(t *testing.T, binDir, cityPath string, extraEnv []string, args ...string) (string, error) {
+	t.Helper()
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+	dataDir := filepath.Join(cityPath, "data")
+
+	cmd := exec.Command("sh", append([]string{script}, args...)...)
+	cmd.Env = append(syncFilteredEnv(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		"GC_DOLT_PORT=1",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	cmd.Env = append(cmd.Env, extraEnv...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 func startReachableTCPListener(t *testing.T) (int, func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1607,9 +1635,6 @@ func TestSyncRejectsTripleZeroPushTimeout(t *testing.T) {
 // TestSyncCLIPushReportsExitCode verifies the CLI-mode plain push surfaces the
 // underlying exit code instead of a generic message (R4).
 func TestSyncCLIPushReportsExitCode(t *testing.T) {
-	root := repoRoot(t)
-	script := filepath.Join(root, syncScript)
-
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "data")
 	dbDir := filepath.Join(dataDir, "app")
@@ -1625,21 +1650,11 @@ func TestSyncCLIPushReportsExitCode(t *testing.T) {
 	writeSyncFakeDoltCLIPushFails(t, binDir, 3)
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
-	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(syncFilteredEnv(),
-		"PATH="+binDir+":"+os.Getenv("PATH"),
-		"GC_CITY_PATH="+cityPath,
-		"GC_PACK_DIR="+root,
-		"GC_DOLT_DATA_DIR="+dataDir,
-		"GC_DOLT_PORT=1",
-		"GC_DOLT_USER=root",
-		"GC_DOLT_PASSWORD=",
-	)
-	out, err := cmd.CombinedOutput()
+	out, err := runSync(t, binDir, cityPath, nil, "--db", "app")
 	if err == nil {
 		t.Fatalf("expected CLI push failure, output:\n%s", out)
 	}
-	if !strings.Contains(string(out), "ERROR: push failed (exit 3)") {
+	if !strings.Contains(out, "ERROR: push failed (exit 3)") {
 		t.Fatalf("expected CLI exit-code-3 failure message, got:\n%s", out)
 	}
 }
@@ -1693,9 +1708,6 @@ func TestSyncCLIForcePushReportsExitCode(t *testing.T) {
 // failed". The final line must name the failing database and reason, and
 // must not claim every database failed.
 func TestSyncSummaryNamesFailedDatabaseAmongHealthyOnes(t *testing.T) {
-	root := repoRoot(t)
-	script := filepath.Join(root, syncScript)
-
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "data")
 	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
@@ -1713,21 +1725,10 @@ func TestSyncSummaryNamesFailedDatabaseAmongHealthyOnes(t *testing.T) {
 	writeSyncFakeDoltCLIPushFailsForDB(t, binDir, "bad", 1)
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
-	cmd := exec.Command("sh", script)
-	cmd.Env = append(syncFilteredEnv(),
-		"PATH="+binDir+":"+os.Getenv("PATH"),
-		"GC_CITY_PATH="+cityPath,
-		"GC_PACK_DIR="+root,
-		"GC_DOLT_DATA_DIR="+dataDir,
-		"GC_DOLT_PORT=1",
-		"GC_DOLT_USER=root",
-		"GC_DOLT_PASSWORD=",
-	)
-	out, err := cmd.CombinedOutput()
+	output, err := runSync(t, binDir, cityPath, nil)
 	if err == nil {
-		t.Fatalf("expected non-zero exit when one of three databases fails to push, output:\n%s", out)
+		t.Fatalf("expected non-zero exit when one of three databases fails to push, output:\n%s", output)
 	}
-	output := string(out)
 
 	if !strings.Contains(output, "good1: pushed") || !strings.Contains(output, "good2: pushed") {
 		t.Fatalf("expected both healthy databases to still push, got:\n%s", output)
