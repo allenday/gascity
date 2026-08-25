@@ -339,6 +339,246 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	}
 }
 
+// newTestRepo creates a fresh git repo in a t.TempDir() with initialBranch
+// as its default branch and a configured test identity, ready to commit
+// into.
+func newTestRepo(t *testing.T, initialBranch string) string {
+	t.Helper()
+	dir := t.TempDir()
+	runGit(t, dir, "init", "--initial-branch="+initialBranch)
+	runGit(t, dir, "config", "user.name", "Gas City Test")
+	runGit(t, dir, "config", "user.email", "gc-test@test.local")
+	return dir
+}
+
+// commitFile writes name=content in dir and commits it, returning the new
+// commit's SHA.
+func commitFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	runGit(t, dir, "add", name)
+	runGit(t, dir, "commit", "-m", "test: "+name)
+	return strings.TrimSpace(runGit(t, dir, "rev-parse", "HEAD"))
+}
+
+// TestResolveDeployRef covers resolveDeployRef's classification, mirrored
+// from packs/actual/all/commands/work-record-check.sh: a repo with an
+// origin remote publishes through origin/main, origin/master, or whatever
+// origin/HEAD resolves to; a repo with no remote has nothing downstream to
+// carry the work, so its own local mainline IS the deploy.
+func TestResolveDeployRef(t *testing.T) {
+	t.Run("no remote, main exists", func(t *testing.T) {
+		dir := newTestRepo(t, "main")
+		commitFile(t, dir, "f.txt", "1")
+		if got := resolveDeployRef(dir); got != "main" {
+			t.Fatalf("resolveDeployRef = %q, want %q", got, "main")
+		}
+	})
+	t.Run("no remote, only master exists", func(t *testing.T) {
+		dir := newTestRepo(t, "master")
+		commitFile(t, dir, "f.txt", "1")
+		if got := resolveDeployRef(dir); got != "master" {
+			t.Fatalf("resolveDeployRef = %q, want %q", got, "master")
+		}
+	})
+	t.Run("no remote, neither main nor master", func(t *testing.T) {
+		dir := newTestRepo(t, "trunk")
+		commitFile(t, dir, "f.txt", "1")
+		if got := resolveDeployRef(dir); got != "" {
+			t.Fatalf("resolveDeployRef = %q, want unresolved", got)
+		}
+	})
+	t.Run("remote with origin/main", func(t *testing.T) {
+		remote := newTestRepo(t, "main")
+		commitFile(t, remote, "f.txt", "1")
+		local := newTestRepo(t, "main")
+		runGit(t, local, "remote", "add", "origin", remote)
+		runGit(t, local, "fetch", "origin")
+		if got := resolveDeployRef(local); got != "origin/main" {
+			t.Fatalf("resolveDeployRef = %q, want %q", got, "origin/main")
+		}
+	})
+	t.Run("remote with only origin/master", func(t *testing.T) {
+		remote := newTestRepo(t, "master")
+		commitFile(t, remote, "f.txt", "1")
+		local := newTestRepo(t, "main")
+		runGit(t, local, "remote", "add", "origin", remote)
+		runGit(t, local, "fetch", "origin")
+		if got := resolveDeployRef(local); got != "origin/master" {
+			t.Fatalf("resolveDeployRef = %q, want %q", got, "origin/master")
+		}
+	})
+	t.Run("remote with neither main nor master falls back to origin/HEAD", func(t *testing.T) {
+		remote := newTestRepo(t, "trunk")
+		commitFile(t, remote, "f.txt", "1")
+		local := newTestRepo(t, "main")
+		runGit(t, local, "remote", "add", "origin", remote)
+		runGit(t, local, "fetch", "origin")
+		runGit(t, local, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+		if got := resolveDeployRef(local); got != "origin/trunk" {
+			t.Fatalf("resolveDeployRef = %q, want %q", got, "origin/trunk")
+		}
+	})
+	t.Run("remote with nothing resolvable", func(t *testing.T) {
+		remote := newTestRepo(t, "trunk")
+		commitFile(t, remote, "f.txt", "1")
+		local := newTestRepo(t, "main")
+		runGit(t, local, "remote", "add", "origin", remote)
+		runGit(t, local, "fetch", "origin")
+		// git fetch auto-populates refs/remotes/origin/HEAD when the remote
+		// has exactly one unambiguous branch. Delete it so this case
+		// actually exercises "origin exists but nothing resolves" instead
+		// of accidentally re-testing the origin/HEAD fallback above.
+		runGit(t, local, "remote", "set-head", "origin", "--delete")
+		if got := resolveDeployRef(local); got != "" {
+			t.Fatalf("resolveDeployRef = %q, want unresolved", got)
+		}
+	})
+}
+
+// TestGitCommitReachedRef covers gitCommitReachedRef's ancestry check and
+// its git-cherry patch-id fallback for a rebase- or squash-merge that
+// rewrote the SHA, mirroring work-record-check.sh's landed check exactly.
+func TestGitCommitReachedRef(t *testing.T) {
+	t.Run("direct ancestor", func(t *testing.T) {
+		dir := newTestRepo(t, "main")
+		commitFile(t, dir, "f.txt", "1")
+		commit := commitFile(t, dir, "f.txt", "2")
+		if !gitCommitReachedRef(dir, commit, "main") {
+			t.Fatal("expected commit reachable as a direct ancestor")
+		}
+	})
+	t.Run("not ancestor, no patch match", func(t *testing.T) {
+		dir := newTestRepo(t, "main")
+		commitFile(t, dir, "f.txt", "1")
+		runGit(t, dir, "checkout", "-b", "feature")
+		commit := commitFile(t, dir, "other.txt", "unrelated")
+		runGit(t, dir, "checkout", "main")
+		if gitCommitReachedRef(dir, commit, "main") {
+			t.Fatal("expected commit NOT reachable: never merged, no patch-id match")
+		}
+	})
+	t.Run("patch-id equivalent counts as reached (squash/rebase rewrite)", func(t *testing.T) {
+		dir := newTestRepo(t, "main")
+		commitFile(t, dir, "f.txt", "1")
+		runGit(t, dir, "checkout", "-b", "feature")
+		commit := commitFile(t, dir, "squashed.txt", "payload")
+		runGit(t, dir, "checkout", "main")
+		// Simulate a squash-merge: apply the same patch directly to main via
+		// cherry-pick, which reproduces the content but mints a brand-new,
+		// different commit SHA — exactly what a real squash or rebase merge
+		// does.
+		runGit(t, dir, "cherry-pick", commit)
+		if !gitCommitReachedRef(dir, commit, "main") {
+			t.Fatal("expected commit reachable via patch-id equivalence (git cherry)")
+		}
+	})
+	t.Run("root commit has no parent, patch-id probe is skipped", func(t *testing.T) {
+		dir := newTestRepo(t, "main")
+		commit := commitFile(t, dir, "f.txt", "root-a")
+		runGit(t, dir, "checkout", "--orphan", "other")
+		commitFile(t, dir, "g.txt", "root-b")
+		if gitCommitReachedRef(dir, commit, "other") {
+			t.Fatal("expected root commit with unrelated ref to be unreachable")
+		}
+	})
+}
+
+// TestGitCommitReachableOnBranch is the regression suite for the ADR-0009
+// tautology gap (gm-n8brur): the old check asked whether a commit was an
+// ancestor of the very branch it was just committed to — both values
+// derived from the same `git rev-parse` call, so it could only fail on a
+// typo. It now resolves and checks against the repo's actual deploy ref,
+// mirroring packs/actual/all/commands/work-record-check.sh.
+func TestGitCommitReachableOnBranch(t *testing.T) {
+	t.Run("tautology bug is fixed: unmerged branch commit is no longer trivially reachable", func(t *testing.T) {
+		dir := newTestRepo(t, "main")
+		commitFile(t, dir, "f.txt", "1")
+		runGit(t, dir, "checkout", "-b", "builder/some-work")
+		commit := commitFile(t, dir, "work.txt", "unshipped")
+		if gitCommitReachableOnBranch(dir, commit, "builder/some-work") {
+			t.Fatal("commit on an unmerged branch must not be reported reachable (ADR-0009 tautology gap)")
+		}
+	})
+	t.Run("mainline-authored commit (no remote) is reachable", func(t *testing.T) {
+		dir := newTestRepo(t, "main")
+		commit := commitFile(t, dir, "f.txt", "1")
+		if !gitCommitReachableOnBranch(dir, commit, "main") {
+			t.Fatal("commit directly on local mainline with no remote must be reachable")
+		}
+	})
+	t.Run("remote-pipelined: commit merged into origin/main is reachable", func(t *testing.T) {
+		remote := newTestRepo(t, "main")
+		commitFile(t, remote, "f.txt", "1")
+		local := newTestRepo(t, "main")
+		runGit(t, local, "remote", "add", "origin", remote)
+		runGit(t, local, "fetch", "origin")
+		runGit(t, local, "reset", "--hard", "origin/main")
+		runGit(t, local, "checkout", "-b", "builder/work")
+		commit := commitFile(t, local, "work.txt", "payload")
+		// Land it on the remote's main out-of-band, simulating a merged PR.
+		runGit(t, remote, "fetch", local, "builder/work")
+		runGit(t, remote, "merge", "--no-ff", "FETCH_HEAD", "-m", "merge builder/work")
+		runGit(t, local, "fetch", "origin")
+		if !gitCommitReachableOnBranch(local, commit, "builder/work") {
+			t.Fatal("commit merged into origin/main must be reachable")
+		}
+	})
+	t.Run("remote-pipelined: unmerged commit is not reachable", func(t *testing.T) {
+		remote := newTestRepo(t, "main")
+		commitFile(t, remote, "f.txt", "1")
+		local := newTestRepo(t, "main")
+		runGit(t, local, "remote", "add", "origin", remote)
+		runGit(t, local, "fetch", "origin")
+		runGit(t, local, "reset", "--hard", "origin/main")
+		runGit(t, local, "checkout", "-b", "builder/work")
+		commit := commitFile(t, local, "work.txt", "payload")
+		if gitCommitReachableOnBranch(local, commit, "builder/work") {
+			t.Fatal("commit never pushed or merged must not be reachable")
+		}
+	})
+	t.Run("remote-pipelined: squash-merged commit is caught by the patch-id fallback", func(t *testing.T) {
+		remote := newTestRepo(t, "main")
+		commitFile(t, remote, "f.txt", "1")
+		local := newTestRepo(t, "main")
+		runGit(t, local, "remote", "add", "origin", remote)
+		runGit(t, local, "fetch", "origin")
+		runGit(t, local, "reset", "--hard", "origin/main")
+		runGit(t, local, "checkout", "-b", "builder/work")
+		commit := commitFile(t, local, "work.txt", "payload")
+		// Simulate a squash-merge on the remote: same patch, new SHA.
+		runGit(t, remote, "fetch", local, "builder/work")
+		runGit(t, remote, "cherry-pick", "FETCH_HEAD")
+		runGit(t, local, "fetch", "origin")
+		if !gitCommitReachableOnBranch(local, commit, "builder/work") {
+			t.Fatal("squash-merged commit must be reachable via patch-id equivalence")
+		}
+	})
+	t.Run("unresolvable deploy ref reports reachable (unproven, never a violation)", func(t *testing.T) {
+		dir := newTestRepo(t, "trunk")
+		commit := commitFile(t, dir, "f.txt", "1")
+		if !gitCommitReachableOnBranch(dir, commit, "trunk") {
+			t.Fatal("an unresolvable deploy ref must report reachable (cannot verify, not a violation)")
+		}
+	})
+	t.Run("flag-like commit is rejected", func(t *testing.T) {
+		dir := newTestRepo(t, "main")
+		commitFile(t, dir, "f.txt", "1")
+		if gitCommitReachableOnBranch(dir, "--evil", "main") {
+			t.Fatal("flag-like commit must be rejected outright")
+		}
+	})
+	t.Run("flag-like branch is rejected", func(t *testing.T) {
+		dir := newTestRepo(t, "main")
+		commit := commitFile(t, dir, "f.txt", "1")
+		if gitCommitReachableOnBranch(dir, commit, "--evil") {
+			t.Fatal("flag-like branch must be rejected outright")
+		}
+	})
+}
+
 func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
 	repoDir := t.TempDir()
 	runGit(t, repoDir, "init", "--initial-branch=main")
