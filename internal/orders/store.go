@@ -424,18 +424,23 @@ func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
 // returned together (the RecentRuns pattern) so callers keep the feed's
 // err-branch semantics.
 //
-// RED stub (ga-h8q2aj): limit is accepted so callers and tests can compile
-// against the bounded signature, but is not yet pushed to the backing, and the
-// query still omits IncludeClosed -- GREEN wires both into the ListQuery
-// (Limit, IncludeClosed, AllowBackingCreatedLimit), mirroring RecentRuns.
-func (s *Store) ListTracking(_ int) ([]OrderRun, error) {
+// limit is pushed to the backing (AllowBackingCreatedLimit) rather than
+// applied client-side, matching RecentRuns's ga-klv fix: slicing after an
+// unbounded fetch still pays the full scan cost on a city with a large
+// retained tracking-bead corpus. IncludeClosed is always true -- unlike
+// LatestOpenRun's deliberate open-only narrowing, the feed lists completed
+// runs alongside in-flight ones. A non-positive limit means unlimited.
+func (s *Store) ListTracking(limit int) ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
 	list, err := s.store.List(beads.ListQuery{
-		Label:    labelOrderTracking,
-		Sort:     beads.SortCreatedDesc,
-		TierMode: beads.TierBoth,
+		Label:                    labelOrderTracking,
+		Limit:                    limit,
+		IncludeClosed:            true,
+		Sort:                     beads.SortCreatedDesc,
+		TierMode:                 beads.TierBoth,
+		AllowBackingCreatedLimit: true,
 	})
 	runs := make([]OrderRun, 0, len(list))
 	for _, b := range list {
