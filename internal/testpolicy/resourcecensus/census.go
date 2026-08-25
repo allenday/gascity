@@ -329,9 +329,9 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeBuildTargets,
 			Resource:        ResourceTestTarget,
-			BaselineCalls:   42,
+			BaselineCalls:   43,
 			BaselineFiles:   4,
-			ReportedCalls:   42,
+			ReportedCalls:   43,
 			ReportedFiles:   4,
 			OwnerBead:       "ga-4ag4p2.1",
 			Invariant:       "declared go-test invocation sites in tracked build-orchestration files (Makefile, CI workflow YAML) cannot grow without an explicit, reviewed baseline update",

@@ -207,9 +207,9 @@ expires = "2026-10-01"
 [[debt]]
 scope = "build_targets"
 resource = "test_target"
-baseline_calls = 42
+baseline_calls = 43
 baseline_files = 4
-reported_calls = 42
+reported_calls = 43
 reported_files = 4
 owner_bead = "ga-4ag4p2.1"
 invariant = "declared go-test invocation sites in tracked build-orchestration files (Makefile, CI workflow YAML) cannot grow without an explicit, reviewed baseline update"
