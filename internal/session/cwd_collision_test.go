@@ -244,6 +244,35 @@ func TestCandidateConfirmedLiveByPID_NoRuntimeFound(t *testing.T) {
 	}
 }
 
+// waitForLivePID polls the production liveness scanner until pid is reported
+// with a non-empty cwd, or timeout expires. It is the named boundary owner
+// for squatter-visibility waits: OS scheduling of a freshly spawned process
+// and /proc scan timing is a true black-box boundary with no completion
+// signal, so a context-bounded ticker poll is used instead of a fixed sleep
+// (TESTING.md "Asynchronous tests wait for facts, not elapsed time").
+func waitForLivePID(t *testing.T, pid int, timeout time.Duration) pidutil.LiveState {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		live := pidutil.LiveCWDs()
+		if !live.Scanned {
+			t.Skip("no /proc on this host; guard cannot be exercised")
+		}
+		if cwd, ok := live.PIDCWDs[pid]; ok && cwd != "" {
+			return live
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatalf("production scanner never observed pid %d within %s (last scan: %+v)", pid, timeout, live)
+		}
+	}
+}
+
 // TestCreateSessionAllowsWorkDirWhenLiveProcessIsUnattributedSquatter proves
 // the FR4/Failure-2 regression: a live process with no relationship to any
 // Gas City session (no GC_SESSION_ID; e.g. the supervisor, the controller,
@@ -274,22 +303,7 @@ func TestCreateSessionAllowsWorkDirWhenLiveProcessIsUnattributedSquatter(t *test
 
 	// Confirm the production scanner really sees it, so a pass below proves
 	// the guard's logic rather than /proc being unavailable on this host.
-	deadline := time.Now().Add(5 * time.Second)
-	sawSquatter := false
-	for time.Now().Before(deadline) {
-		live := pidutil.LiveCWDs()
-		if !live.Scanned {
-			t.Skip("no /proc on this host; guard cannot be exercised")
-		}
-		if cwd, ok := live.PIDCWDs[squatter.Process.Pid]; ok && cwd != "" {
-			sawSquatter = true
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !sawSquatter {
-		t.Fatalf("production scanner never observed squatter pid %d at %s", squatter.Process.Pid, dir)
-	}
+	waitForLivePID(t, squatter.Process.Pid, 5*time.Second)
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
