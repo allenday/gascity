@@ -294,10 +294,10 @@ func TestBestStoreWithWorkRanksTierAheadOfPriority(t *testing.T) {
 			wantDir: "riga",
 		},
 		{
-			name:    "assigned beats routed at worse priority",
+			name:    "assigned in one store does not beat routed at better priority in another",
 			cityRow: `[{"id":"ci-1","priority":0}]`,
 			rigRow:  `[{"id":"va-1","priority":3,"assignee":"me"}]`,
-			wantDir: "riga",
+			wantDir: "city",
 		},
 		{
 			name:    "within the routed tier, priority decides",
