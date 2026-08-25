@@ -420,12 +420,15 @@ func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
 // decoded into OrderRun values. It is the typed face of the /v0/orders/feed read
 // it replaces: it confines the order-tracking List and the tracking-bead decode
 // the feed previously performed inline. Beads with no order-run label (which
-// RunFromTrackingBead rejects) are skipped. The query is byte-identical to the
-// feed's prior raw scan — order-tracking label, created-desc, both tiers, and no
-// IncludeClosed so only in-flight/open tracking beads surface. Decoded rows and
-// any list error are returned together (the RecentRuns pattern) so callers keep
-// the feed's err-branch semantics.
-func (s *Store) ListTracking() ([]OrderRun, error) {
+// RunFromTrackingBead rejects) are skipped. Decoded rows and any list error are
+// returned together (the RecentRuns pattern) so callers keep the feed's
+// err-branch semantics.
+//
+// RED stub (ga-h8q2aj): limit is accepted so callers and tests can compile
+// against the bounded signature, but is not yet pushed to the backing, and the
+// query still omits IncludeClosed -- GREEN wires both into the ListQuery
+// (Limit, IncludeClosed, AllowBackingCreatedLimit), mirroring RecentRuns.
+func (s *Store) ListTracking(_ int) ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
