@@ -67,7 +67,7 @@ func writeSyncFakeDolt(t *testing.T, dir string) string {
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
   *"SELECT name, url FROM dolt_remotes"*)
-    printf 'name,url\norigin,https://example.invalid/repo\n'
+    printf 'name,url\norigin,file:///example.invalid/repo\n'
     ;;
   *"CALL DOLT_FETCH("*)
     :
@@ -94,7 +94,7 @@ func writeSyncFakeDoltActiveBranch(t *testing.T, dir, activeBranch string) strin
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
   *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
-    printf 'name,url\norigin,https://example.invalid/repo\n'
+    printf 'name,url\norigin,file:///example.invalid/repo\n'
     ;;
   *"CALL DOLT_FETCH("*)
     :
@@ -124,7 +124,7 @@ func writeSyncFakeDoltInvalidActiveBranch(t *testing.T, dir string) string {
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
   *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
-    printf 'name,url\norigin,https://example.invalid/repo\n'
+    printf 'name,url\norigin,file:///example.invalid/repo\n'
     ;;
   *"CALL DOLT_FETCH("*)
     :
@@ -189,7 +189,7 @@ func writeSyncFakeDoltPushFails(t *testing.T, dir string, exitCode int, stderr s
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
   *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
-    printf 'name,url\norigin,https://example.invalid/repo\n'
+    printf 'name,url\norigin,file:///example.invalid/repo\n'
     exit 0
     ;;
   *"CALL DOLT_FETCH("*)
@@ -231,7 +231,7 @@ func writeSyncFakeDoltPushFailsNoTrailingNewline(t *testing.T, dir string, exitC
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
   *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
-    printf 'name,url\norigin,https://example.invalid/repo\n'
+    printf 'name,url\norigin,file:///example.invalid/repo\n'
     exit 0
     ;;
   *"CALL DOLT_FETCH("*)
@@ -296,7 +296,7 @@ func writeSyncFakeDoltPushEchoesArgs(t *testing.T, dir string) {
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
   *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
-    printf 'name,url\norigin,https://example.invalid/repo\n'
+    printf 'name,url\norigin,file:///example.invalid/repo\n'
     exit 0
     ;;
   *"CALL DOLT_FETCH("*)
@@ -391,7 +391,7 @@ func TestSyncUsesLiveSQLWhenManagedServerReachable(t *testing.T) {
 
 	// The success line is a parsed contract — assert it byte-for-byte so a
 	// format change is caught here rather than breaking downstream consumers.
-	if !strings.Contains(string(out), "  app: pushed main -> origin:main (https://example.invalid/repo)") {
+	if !strings.Contains(string(out), "  app: pushed main -> origin:main (file:///example.invalid/repo)") {
 		t.Fatalf("output missing byte-for-byte success line:\n%s", out)
 	}
 
@@ -583,7 +583,7 @@ func TestSyncDryRunShowsResolvedActiveBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gc dolt sync --dry-run failed: %v\n%s", err, out)
 	}
-	want := "app: would push gascity-3 -> origin:gascity-3 (https://example.invalid/repo)"
+	want := "app: would push gascity-3 -> origin:gascity-3 (file:///example.invalid/repo)"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("dry run output should show resolved refspec\nwant %q\ngot:\n%s", want, out)
 	}
@@ -694,7 +694,7 @@ func TestSyncCLIFallbackPushesOriginMain(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
 		t.Fatalf("mkdir db: %v", err)
 	}
-	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	remotes := `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`
 	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
 		t.Fatalf("write remotes: %v", err)
 	}
@@ -882,7 +882,7 @@ func TestSyncCLIFallbackReadsRepoStateForActiveBranch(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
 		t.Fatalf("mkdir db: %v", err)
 	}
-	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	remotes := `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`
 	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
 		t.Fatalf("write remotes: %v", err)
 	}
@@ -930,7 +930,7 @@ func TestSyncCLIFallbackIgnoresNestedRepoStateHead(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
 		t.Fatalf("mkdir db: %v", err)
 	}
-	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	remotes := `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`
 	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
 		t.Fatalf("write remotes: %v", err)
 	}
@@ -1597,7 +1597,7 @@ func TestSyncCLIPushReportsExitCode(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
 		t.Fatalf("mkdir db: %v", err)
 	}
-	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	remotes := `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`
 	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
 		t.Fatalf("write remotes: %v", err)
 	}
@@ -1638,7 +1638,7 @@ func TestSyncCLIForcePushReportsExitCode(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
 		t.Fatalf("mkdir db: %v", err)
 	}
-	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	remotes := `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`
 	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
 		t.Fatalf("write remotes: %v", err)
 	}
