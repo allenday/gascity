@@ -191,12 +191,41 @@ func lintPack(packDir string) lintPackReport {
 	out.Diagnostics = append(out.Diagnostics, lintFormulaFiles(packDir)...)
 	targets, diagnostics := collectLintPromptTargets(packDir, loaded)
 	out.Diagnostics = append(out.Diagnostics, diagnostics...)
+	packDirs := lintFragmentSearchDirs(packDir, loaded.PackDirs)
 	for _, target := range targets {
-		out.Diagnostics = append(out.Diagnostics, lintPrompt(packDir, loaded.PackDirs, loaded.Providers, target)...)
+		out.Diagnostics = append(out.Diagnostics, lintPrompt(packDir, packDirs, loaded.Providers, target)...)
 	}
 	out.Diagnostics = append(out.Diagnostics, lintClaudeOverlayHookShape(packDir)...)
 	out.OK = lintErrorCount(out.Diagnostics) == 0
 	return out
+}
+
+// lintFragmentSearchDirs widens a pack's own recursively-included PackDirs
+// with whatever pack dirs its hosting city composes in at the rig level
+// (city.toml's per-rig "includes"). A pack can depend on fragments from a
+// sibling pack purely through that city-level composition without declaring
+// the sibling in its own pack.toml — the runtime resolves such fragments
+// fine (resolveTemplate in template_resolve.go calls
+// city.PackDirsForRig(rigName)), but a standalone pack load
+// (config.LoadPackForLint) never reads city.toml, so lint reported those
+// fragments "not found" even though they render correctly.
+//
+// gc lint has no single rig to bind a standalone pack to, so this mirrors
+// the rig-less fallback the runtime already uses for scope=city agents:
+// PackDirsForRig("") returns the union of every rig's composed pack dirs
+// (City.AllPackDirs). When no city is discoverable from packDir, or it
+// fails to load, this falls back to the pack's own dirs unchanged — lint
+// must still work for a pack with no city at all.
+func lintFragmentSearchDirs(packDir string, ownPackDirs []string) []string {
+	cityPath, err := findCity(packDir)
+	if err != nil {
+		return ownPackDirs
+	}
+	cfg, err := loadCityConfigAdvisory(cityPath)
+	if err != nil || cfg == nil {
+		return ownPackDirs
+	}
+	return appendUniqueStrings(ownPackDirs, cfg.PackDirsForRig("")...)
 }
 
 func lintNamedSessionPoolConflicts(packPath string, loaded *config.LintPackLoad) []lintDiagnostic {
