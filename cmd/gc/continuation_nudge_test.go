@@ -189,18 +189,22 @@ func TestSelectReadyContinuationClaimCandidates_RequiresReadyOpenExactProvenance
 			b.Type = "session"
 			return b
 		}(), step: baseStep, ready: true},
-		{name: "missing root session", root: func() beads.Bead {
+		// The root's gc.session_name is a dashboard back-fill from the most
+		// recent in_progress step, not an ownership record, so it never gates
+		// candidacy. A multi-agent molecule's root can only ever name one of its
+		// templates; gating on it stranded every cross-template successor.
+		{name: "root session stamp absent", root: func() beads.Bead {
 			b := baseRoot
 			b.Metadata = cloneStringMap(baseRoot.Metadata)
 			delete(b.Metadata, beadmeta.SessionNameMetadataKey)
 			return b
-		}(), step: baseStep, ready: true},
-		{name: "wrong root session", root: func() beads.Bead {
+		}(), step: baseStep, ready: true, want: 1},
+		{name: "root session stamp names another template", root: func() beads.Bead {
 			b := baseRoot
 			b.Metadata = cloneStringMap(baseRoot.Metadata)
 			b.Metadata[beadmeta.SessionNameMetadataKey] = "other-session"
 			return b
-		}(), step: baseStep, ready: true},
+		}(), step: baseStep, ready: true, want: 1},
 		{name: "not graph v2 root", root: func() beads.Bead {
 			b := baseRoot
 			b.Metadata = cloneStringMap(baseRoot.Metadata)
