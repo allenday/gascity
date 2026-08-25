@@ -142,12 +142,36 @@ func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, bra
 	return violations
 }
 
-// gitCommitReachableOnBranch reports whether commit is an ancestor of branch in
-// the git repository at repoDir (worktrees share one object store, so any
-// worktree dir resolves refs across the repo). A non-nil error from git — bad
-// repo, unknown ref, unknown commit — reads as "not reachable". A commit/branch
-// that looks like a flag (leading "-") is rejected outright so a malformed
-// metadata value can never be parsed as a git option.
+// gitCommitReachableOnBranch reports whether commit has reached the deploy
+// ref a consumer of repoDir actually reads (worktrees share one object
+// store, so any worktree dir resolves refs across the repo) — not merely
+// branch, the value stamped as gc.work_branch at claim time.
+//
+// This closes the ADR-0009 tautology gap (gm-n8brur): the old check asked
+// "is this commit an ancestor of the branch it was just committed to",
+// where both operands were derived from the same `git rev-parse` call at
+// claim time, so it could only fail on a typo. It now asks the real
+// question, mirroring packs/actual/all/commands/work-record-check.sh:
+// resolve the ref a consumer reads (a repo with an origin remote publishes
+// through origin/main, origin/master, or origin/HEAD; a repo with no
+// remote has nothing downstream to carry the work, so its own local
+// mainline IS the deploy), then check ancestry against that ref, falling
+// back to a patch-id probe (git cherry) for the narrow case of a rebase- or
+// squash-merge that rewrote the SHA moments before this check ran.
+//
+// branch is retained in the signature for the caller's violation message
+// and the flag-injection guard below; the ancestry check itself no longer
+// uses it.
+//
+// When no deploy ref can be resolved for repoDir this reports reachable —
+// UNPROVEN, not a violation. Every other read failure in this gate is
+// best-effort and never blocks or warns on its own inability to verify
+// (see runWorkRecordCloseGate's store-open fallback); an unresolvable
+// deploy ref is the same kind of "cannot verify", not a positive finding.
+//
+// A commit or branch that looks like a flag (leading "-") is rejected
+// outright so a malformed metadata value can never be parsed as a git
+// option.
 func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	if strings.TrimSpace(repoDir) == "" || commit == "" || branch == "" {
 		return false
@@ -155,7 +179,80 @@ func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	if strings.HasPrefix(commit, "-") || strings.HasPrefix(branch, "-") {
 		return false
 	}
-	return exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, branch).Run() == nil
+	ref := resolveDeployRef(repoDir)
+	if ref == "" {
+		return true
+	}
+	return gitCommitReachedRef(repoDir, commit, ref)
+}
+
+// resolveDeployRef resolves the ref a consumer of repoDir actually reads,
+// mirroring packs/actual/all/commands/work-record-check.sh's classification
+// exactly so the close-time Go gate and that reference script never
+// disagree about which ref matters for a given repo:
+//
+//   - A repo with an origin remote publishes through origin/main or
+//     origin/master, or — if neither exists — whatever origin/HEAD
+//     resolves to.
+//   - A repo with no remote has nothing downstream to carry the work: its
+//     own local main or master branch IS the deploy.
+//
+// Returns "" when neither resolves — UNPROVEN. The caller must treat that
+// as "cannot verify", never as a violation.
+func resolveDeployRef(repoDir string) string {
+	if strings.TrimSpace(repoDir) == "" {
+		return ""
+	}
+	if exec.Command("git", "-C", repoDir, "remote", "get-url", "origin").Run() == nil {
+		for _, candidate := range [...]string{"origin/main", "origin/master"} {
+			if gitRefExists(repoDir, candidate) {
+				return candidate
+			}
+		}
+		out, err := exec.Command("git", "-C", repoDir, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").Output()
+		if err == nil {
+			if head := strings.TrimSpace(string(out)); head != "" && gitRefExists(repoDir, head) {
+				return head
+			}
+		}
+		return ""
+	}
+	for _, candidate := range [...]string{"main", "master"} {
+		if gitRefExists(repoDir, "refs/heads/"+candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// gitRefExists reports whether ref resolves to a commit in repoDir.
+func gitRefExists(repoDir, ref string) bool {
+	if ref == "" || strings.HasPrefix(ref, "-") {
+		return false
+	}
+	return exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "-q", ref).Run() == nil
+}
+
+// gitCommitReachedRef reports whether commit has reached ref: either as a
+// direct ancestor, or — covering a rebase- or squash-merge that rewrote the
+// SHA moments before this check ran — as a patch-id equivalent already on
+// ref. Mirrors work-record-check.sh's landed check and its git-cherry
+// fallback exactly, including the documented residual gap: a MULTI-commit
+// squash-merge rewrites every patch id in the squash, so that case is not
+// caught here either.
+func gitCommitReachedRef(repoDir, commit, ref string) bool {
+	if exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, ref).Run() == nil {
+		return true
+	}
+	if exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "-q", commit+"^").Run() != nil {
+		return false
+	}
+	out, err := exec.Command("git", "-C", repoDir, "cherry", ref, commit, commit+"^").Output()
+	if err != nil {
+		return false
+	}
+	first, _, _ := strings.Cut(string(out), "\n")
+	return strings.HasPrefix(first, "-")
 }
 
 // workRecordCloseTargets returns the bead IDs a bd invocation closes, and
