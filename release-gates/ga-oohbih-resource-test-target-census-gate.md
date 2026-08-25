@@ -57,3 +57,41 @@ All clause-3 proofs are decisive, so the inconclusive-path reachability/test-loa
 ## Static-gate diagnostic
 
 An exploratory full-repository `make lint` was not used as gate evidence: the shared default golangci cache emitted stale findings for already-deleted `/var/tmp` worktrees plus unrelated generated/vendor paths. The required changed-PR lane was then rerun with a fresh on-disk lint cache and the supported parallel-runner flag; it completed with `0 issues`. Full-repository formatting and standalone `go vet ./...` were also clean.
+
+## Amendment — 2026-08-25, post-gate baseline refresh
+
+The figures recorded above describe the original evaluation at reviewed source
+`591b819a8fc58cfd881fa6cdb0c11e3b3c85e251` against base
+`origin/main@c3b12fb91ac53cfddcbac9ac3aba43d5c3ddcf8f`. They are retained
+unaltered as the historical record of that run.
+
+After that evaluation, `2cd07e018b` ("Fail closed when required PR CI evidence
+is missing", #5576) landed on `main` and added a 43rd declared `go test`
+invocation line to the repository `Makefile`:
+
+```make
+	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/prwatchdog/...
+```
+
+Because `build_targets/test_target` is an exact-equality ratchet, the
+`pull_request` merge commit counted 43 against the checked baseline of 42 and
+`TestRepositoryLedgerMatchesCensusAndDocumentation` failed in CI. The new
+`.github/workflows/pr-evidence-watchdog.yml` from the same commit contributes
+zero occurrences and is not implicated; the file count stays at 4.
+
+Applied on this branch:
+
+- Merged current `origin/main` (no rebase, so the reviewed SHA above remains in
+  ancestry and this record stays resolvable).
+- Bumped the `build_targets`/`test_target` row from 42 to 43 calls in both
+  sources of truth that `comparePolicyFields` requires to agree — the
+  `bootstrapPolicy` row in `internal/testpolicy/resourcecensus/census.go` and
+  the mirrored row in `test/test-resources.toml`. `reported_*` was bumped
+  alongside `baseline_*` so the rendered row keeps no historical-census suffix,
+  which is correct for a dimension that has no pre-AST census.
+- Regenerated the `TESTING.md` ledger block via the supported
+  `-run TestRepositoryLedgerMatchesCensusAndDocumentation -update` path.
+
+The reviewed source is now a merge commit rather than
+`591b819a8fc58cfd881fa6cdb0c11e3b3c85e251`. A deployer re-gate is warranted
+before merge if the gate policy requires the verdict to name the exact tip.
