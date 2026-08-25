@@ -6,7 +6,7 @@ description: Authoritative specification for the qualified-identity encoding sha
 | Field | Value |
 |---|---|
 | Status | Authoritative specification |
-| Last verified | 2026-08-18 |
+| Last verified | 2026-08-25 |
 | Primary implementation | `internal/agent/session_name.go` |
 | Mints identities | gascity |
 | Compares identities | beads |
@@ -30,17 +30,25 @@ repos and hoping both readings match.
 ## 1. The separator alphabet
 
 A qualified identity is built from name segments joined by structural
-separators. Three characters are reserved as **positional separators**:
+separators. Exactly two characters are reserved as **positional separators**
+in a raw (unencoded) qualified identity:
 
 - `/` — the rig/agent boundary (`rig/agent`)
 - `.` — the city/agent boundary on an imported identity (`city.agent`)
-- `_` — reserved alongside them because the encoded form uses it (§2)
 
-These three characters are always positional separators, never part of a name.
-A name segment does not itself contain `/`, `.`, or a double underscore.
-Encoding only has to disambiguate `/` and `.`, because those are the two
-separators that appear in a raw qualified identity; `_` appears solely as
-half of an encoded pair (`--` or `__`), never on its own.
+These two characters are always positional, never part of a name segment. A
+literal `-` or `_`, by contrast, is an ordinary character a name segment MAY
+contain: gascity's own agent-name validation permits both
+(`internal/config/config.go:27`, enforced at `:4016` — a name must match
+`[a-zA-Z0-9][a-zA-Z0-9_-]*`, so `hello-world` and `builder-1` are valid agent
+names in their own right, not `/`-delimited pairs).
+
+Encoding (§2) represents each positional separator as a doubled pair rather
+than touching `-` or `_` on their own: a literal `-`, doubled, stands in for
+`/` (as `--`); a literal `_`, doubled, stands in for `.` (as `__`). A single
+`-` or single `_` is never itself a positional separator — only the exact
+two-byte sequences `--` and `__` carry structural meaning under this
+contract.
 
 ## 2. The two-axis encoding table
 
@@ -63,20 +71,31 @@ composes `rig/agent` and `city.agent` strings when constructing an agent's
 qualified name, and it is the only codebase that calls the encode direction
 (§4) to produce a tmux-safe session name from one.
 
-**beads** only ever **compares** already-minted strings. It stores the
-encoded form verbatim — for example as session-name metadata on a bead —
-and matches it byte-for-byte against what gascity re-derives. beads does not
-independently encode or decode a qualified identity, and MUST NOT implement
-its own copy of the separator table in §2: a second implementation is
-exactly how the two sides drift apart.
+**beads** never mints and has no equivalent of the encode direction. It does,
+however, independently re-derive part of the *decode* direction for
+comparison purposes: `canonicalActor` (beads repo,
+`internal/storage/issueops/identity.go:50`, duplicated at
+`internal/validation/issue.go:112` because storage may not import
+validation) special-cases an exact `--` run and decodes it to `/`, so a
+rig-qualified identity compares equal regardless of which spelling it
+arrived in. It does NOT restore `__` to `.` the way gascity's own
+`UnsanitizeQualifiedNameFromSession` (§4) does — instead it collapses `__`,
+and any other single or mixed run of `.`/`_`/`-`, to a generic `_`. This is
+the independent re-derivation that let the two sides drift into being
+complements before this contract existed (see the architecture ruling this
+contract implements, `ga-qv1d2d`). A canonicalizer implementing this rule
+MUST NOT collapse `--` and `__` to that same generic form: doing so is the
+widening this contract exists to prevent.
 
 ## 4. Source of truth
 
 The tables above describe the code; they do not replace it. The
 authoritative implementation is `internal/agent/session_name.go`:
 
-- `sessionNameQualifiedReplacer` — the encode direction (§2, raw → encoded).
-- `sessionNameQualifiedReverseReplacer` — the decode direction (§2, encoded → raw).
+- `sessionNameQualifiedReplacer` (`internal/agent/session_name.go:15-18`) —
+  the encode direction (§2, raw → encoded).
+- `sessionNameQualifiedReverseReplacer` (`internal/agent/session_name.go:20-23`) —
+  the decode direction (§2, encoded → raw).
 
 If this document and `internal/agent/session_name.go` ever disagree, the
 code wins. File a correction against this doc rather than reimplementing
