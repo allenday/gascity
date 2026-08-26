@@ -40,6 +40,15 @@ func TestIsCompiledGraphWorkflow(t *testing.T) {
 	})
 }
 
+func TestFormulaRoleAliasUsesBareRigRole(t *testing.T) {
+	if got := formulaRoleTarget("gc.run-operator"); got != "run-operator" {
+		t.Fatalf("formulaRoleTarget(gc.run-operator) = %q, want run-operator", got)
+	}
+	if got := formulaRoleTarget("mayor"); got != "mayor" {
+		t.Fatalf("formulaRoleTarget(mayor) = %q, want mayor", got)
+	}
+}
+
 func TestIsControlDispatcherKind(t *testing.T) {
 	for _, kind := range []string{"check", "fanout", "retry-eval", "scope-check", "workflow-finalize", "retry", "ralph"} {
 		if !IsControlDispatcherKind(kind) {
