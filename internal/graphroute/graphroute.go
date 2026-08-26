@@ -427,9 +427,15 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		}
 		return GraphRouteBinding{}, fmt.Errorf("step %s: assignee target %q did not resolve to a concrete session; use gc.run_target for config routing", stepID, target.value)
 	}
-	agentCfg, ok := deps.Resolver.ResolveAgent(cfg, formulaRoleTarget(target.value), rigContext)
+	// Imported role packs publish binding-qualified identities such as
+	// gc.run-operator. Prefer that exact formula target; older unbound packs
+	// remain compatible through the legacy gc.<role> fallback below.
+	agentCfg, ok := deps.Resolver.ResolveAgent(cfg, target.value, rigContext)
 	if !ok {
-		return GraphRouteBinding{}, fmt.Errorf("step %s: unknown formulas v2 target %q in rig context %q", stepID, target.value, rigContext)
+		agentCfg, ok = deps.Resolver.ResolveAgent(cfg, formulaRoleTarget(target.value), rigContext)
+	}
+	if !ok {
+		return GraphRouteBinding{}, fmt.Errorf("step %s: unknown formulas v2 target %q", stepID, target.value)
 	}
 	binding := GraphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg)}
 	if agentCfg.SupportsInstanceExpansion() {
