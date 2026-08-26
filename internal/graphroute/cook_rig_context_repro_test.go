@@ -137,3 +137,25 @@ func TestCookRigContext_ExplicitDefaultBindingResolvesBareTarget(t *testing.T) {
 		t.Fatalf("root gc.routed_to = %q, want empty (cook must not route the root)", got)
 	}
 }
+
+func TestApplyGraphRoutingUsesRigScopeForCityScopedFormulaTarget(t *testing.T) {
+	three := 3
+	one := 1
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "mayor", MaxActiveSessions: &three},
+		{Name: "run-operator", Dir: "my-project", MaxActiveSessions: &three},
+		{Name: "run-operator", Dir: "other-project", MaxActiveSessions: &three},
+		{Name: "control-dispatcher", MaxActiveSessions: &one},
+		{Name: "control-dispatcher", Dir: "my-project", MaxActiveSessions: &one},
+	}}
+	recipe := cookReproRecipe()
+	recipe.Steps[1].Metadata["gc.run_target"] = "gc.run-operator"
+
+	err := ApplyGraphRouting(recipe, &cfg.Agents[0], "mayor", nil, "", "rig", "my-project", "", nil, "test-city", cfg, Deps{Resolver: rigAwareResolver{}})
+	if err != nil {
+		t.Fatalf("ApplyGraphRouting: %v", err)
+	}
+	if got := recipe.Steps[1].Metadata["gc.routed_to"]; got != "my-project/run-operator" {
+		t.Fatalf("gc.routed_to = %q, want my-project/run-operator", got)
+	}
+}
