@@ -429,7 +429,7 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	}
 	agentCfg, ok := deps.Resolver.ResolveAgent(cfg, formulaRoleTarget(target.value), rigContext)
 	if !ok {
-		return GraphRouteBinding{}, fmt.Errorf("step %s: unknown formulas v2 target %q", stepID, target.value)
+		return GraphRouteBinding{}, fmt.Errorf("step %s: unknown formulas v2 target %q in rig context %q", stepID, target.value, rigContext)
 	}
 	binding := GraphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg)}
 	if agentCfg.SupportsInstanceExpansion() {
