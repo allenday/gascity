@@ -1,6 +1,7 @@
 package providerledger
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -447,6 +448,54 @@ func TestValidateRejectsDuplicateSourceBindings(t *testing.T) {
 	err := Validate([]Entry{first, second}, now)
 	if err == nil || !strings.Contains(err.Error(), "source binding cmd/gc/providers.go#newFixture is also owned") {
 		t.Fatalf("Validate() error = %v, want duplicate-source error", err)
+	}
+}
+
+func TestValidateRejectsCollidingWaiverExpiryDates(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	waiverOn := func(y int, m time.Month, d, hour int) ContractClaim {
+		return ContractClaim{
+			Contract:    ContractRuntimeProvider,
+			Disposition: DispositionWaived,
+			Waiver: &Waiver{
+				Owner:   "example-owner",
+				Expires: time.Date(y, m, d, hour, 0, 0, 0, time.UTC),
+				Reason:  "fixture",
+			},
+		}
+	}
+	first := validRuntimeEntry("runtime.expiry.first", "unused:first", waiverOn(2026, time.August, 20, 0))
+	second := validRuntimeEntry("runtime.expiry.second", "unused:second", waiverOn(2026, time.August, 20, 23))
+
+	err := Validate([]Entry{first, second}, now)
+	if err == nil {
+		t.Fatalf("Validate() error = nil, want a waiver-expiry collision error")
+	}
+	for _, want := range []string{"runtime.expiry.first", "runtime.expiry.second", "2026-08-20"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Validate() error = %v, want it to mention %q", err, want)
+		}
+	}
+}
+
+func TestValidateAllowsDistinctWaiverExpiryDates(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	waiverOn := func(y int, m time.Month, d int) ContractClaim {
+		return ContractClaim{
+			Contract:    ContractRuntimeProvider,
+			Disposition: DispositionWaived,
+			Waiver: &Waiver{
+				Owner:   "example-owner",
+				Expires: time.Date(y, m, d, 0, 0, 0, 0, time.UTC),
+				Reason:  "fixture",
+			},
+		}
+	}
+	first := validRuntimeEntry("runtime.expiry.distinct.first", "unused:distinct.first", waiverOn(2026, time.August, 20))
+	second := validRuntimeEntry("runtime.expiry.distinct.second", "unused:distinct.second", waiverOn(2026, time.August, 21))
+
+	if err := Validate([]Entry{first, second}, now); err != nil {
+		t.Fatalf("Validate() error = %v, want nil for distinct waiver expiry dates", err)
 	}
 }
 
@@ -1645,6 +1694,26 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	}
 	if second[len(second)-1].Source.Function != "resolveSessionTransportProvider" {
 		t.Errorf("Catalog() source leaked mutation: %q", second[len(second)-1].Source.Function)
+	}
+}
+
+func TestCatalogWaiverExpiriesAreDistinctCalendarDates(t *testing.T) {
+	seen := make(map[string]string)
+	for _, entry := range Catalog() {
+		for _, claim := range entry.Claims {
+			if claim.Waiver == nil {
+				continue
+			}
+			dateKey := claim.Waiver.Expires.Format("2006-01-02")
+			label := fmt.Sprintf("%s (%s)", entry.ID, renderSymbolRef(claim.Constructor))
+			if prior, ok := seen[dateKey]; ok {
+				t.Fatalf("waiver expiry %s is shared by %s and %s, want every runtime-provider waiver on a distinct calendar date", dateKey, prior, label)
+			}
+			seen[dateKey] = label
+		}
+	}
+	if len(seen) != 8 {
+		t.Fatalf("got %d distinct-dated waived runtime-provider claims in Catalog(), want 8", len(seen))
 	}
 }
 
