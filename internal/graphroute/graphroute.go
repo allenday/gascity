@@ -516,9 +516,6 @@ func ResolveGraphDirectSessionBinding(store beads.Store, cityName string, cfg *c
 // graph.v2 workflow recipe.
 func DecorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]string, sourceBeadID, scopeKind, scopeRef, rootStoreRef, routedTo, sessionName string, store beads.Store, cityName string, cfg *config.City, deps Deps) error {
 	defaultRoute := GraphRouteBinding{QualifiedName: routedTo}
-	if scopeKind == "rig" {
-		defaultRoute.RigContext = strings.TrimSpace(scopeRef)
-	}
 	if sessionName != "" {
 		defaultRoute.SessionName = sessionName
 	} else {
