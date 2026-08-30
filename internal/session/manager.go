@@ -698,8 +698,12 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		return nil
 	}
 	found, err := scanner.FindRuntimesBySessionID(sessionID)
-	if err != nil {
-		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %v", sessionID, err)
+	if err != nil && !(len(found) == 0 && runtime.IsSessionGone(err)) {
+		// A partial process-table scan cannot distinguish a live tracked tmux
+		// session from an escaped orphan. Do not kill any partial result: a
+		// false-positive kill loses assigned work. Refuse this start and let the
+		// reconciler retry after a complete observation instead.
+		return fmt.Errorf("scan orphaned runtimes for %s: %w", sessionID, err)
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
 	var termErrs []error

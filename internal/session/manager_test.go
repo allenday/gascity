@@ -511,17 +511,15 @@ func TestCreateKillsUntrackedOrphanFromSameCityBeforeStartWithNormalizedPath(t *
 }
 
 // TestCreateRefusesStartWhenOrphanNotConfirmedDead pins the fail-closed
-// contract: when an untracked same-session orphan cannot be confirmed dead
-// (TerminateRuntime errors — e.g. it survived SIGKILL), Create must refuse to
-// start a replacement rather than race the survivor for the same work bead. A
-// concurrent scan error is logged and treated as fail-closed, so the orphan the
-// scan did surface is still targeted. No Start is attempted.
+// contract: when the process-table scan is incomplete, Create must refuse to
+// start a replacement rather than race a survivor for the same work bead. Its
+// partial result cannot prove an untracked runtime is orphaned, so no runtime
+// is terminated. No Start is attempted.
 func TestCreateRefusesStartWhenOrphanNotConfirmedDead(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &orphanScanProvider{
 		Fake:         runtime.NewFake(),
 		findErr:      errors.New("partial scan failed"),
-		terminateErr: errors.New("terminate failed"),
 		results: []runtime.LiveRuntime{{
 			PID:       1234,
 			IsTracked: false,
@@ -541,11 +539,32 @@ func TestCreateRefusesStartWhenOrphanNotConfirmedDead(t *testing.T) {
 			t.Fatalf("Start was attempted despite unconfirmed orphan; events = %v", sp.events)
 		}
 	}
-	want := []string{"find:", "terminate:"}
-	for i, prefix := range want {
-		if i >= len(sp.events) || !strings.HasPrefix(sp.events[i], prefix) {
-			t.Fatalf("events = %v, want prefixes %v", sp.events, want)
-		}
+	if got := sp.events; len(got) != 1 || !strings.HasPrefix(got[0], "find:") {
+		t.Fatalf("events = %v, want only a process-table scan", got)
+	}
+}
+
+// TestCreateStartsWhenNoTmuxServerExists covers a fresh City: tmux reports
+// its authoritative empty state as "no tmux server running". That is not a
+// partial observation and must not prevent the first session from starting.
+func TestCreateStartsWhenNoTmuxServerExists(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake:    runtime.NewFake(),
+		findErr: errors.New("tmux server unreachable: no tmux server running"),
+	}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatalf("runtime session %q not running after fresh-city create", info.SessionName)
+	}
+	want := []string{"find:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
 	}
 }
 
