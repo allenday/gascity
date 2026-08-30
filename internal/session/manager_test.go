@@ -544,6 +544,30 @@ func TestCreateRefusesStartWhenOrphanNotConfirmedDead(t *testing.T) {
 	}
 }
 
+// TestCreateStartsWhenNoTmuxServerExists covers a fresh City: tmux reports
+// its authoritative empty state as "no tmux server running". That is not a
+// partial observation and must not prevent the first session from starting.
+func TestCreateStartsWhenNoTmuxServerExists(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake:    runtime.NewFake(),
+		findErr: errors.New("tmux server unreachable: no tmux server running"),
+	}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatalf("runtime session %q not running after fresh-city create", info.SessionName)
+	}
+	want := []string{"find:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
 // acpOrphanScanProvider augments orphanScanProvider with ACP route bookkeeping
 // so a resume that reserves an ACP route before the pre-start orphan gate can
 // be observed unwinding that reservation when the gate refuses. RouteACP and
