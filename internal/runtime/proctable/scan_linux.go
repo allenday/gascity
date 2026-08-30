@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -133,7 +134,7 @@ func mergeCurrentEnv(env map[string]string) map[string]string {
 func parseEnvironFile(path string) (map[string]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) || os.IsPermission(err) {
+		if isGoneOrUnreadableProcEntry(err) {
 			return nil, nil
 		}
 		return nil, err
@@ -150,6 +151,14 @@ func parseEnvironFile(path string) (map[string]string, error) {
 		env[key] = value
 	}
 	return env, nil
+}
+
+// isGoneOrUnreadableProcEntry reports a normal process-table race or an entry
+// the scanner cannot inspect. Linux can report ESRCH—not just ENOENT—when a
+// process exits between directory enumeration and its /proc read.
+func isGoneOrUnreadableProcEntry(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) ||
+		errors.Is(err, fs.ErrPermission) || os.IsPermission(err)
 }
 
 func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
@@ -187,7 +196,7 @@ func isInfrastructureParent(root string, pid int) bool {
 func readParentPID(path string) (int, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) || os.IsPermission(err) {
+		if isGoneOrUnreadableProcEntry(err) {
 			return 0, false, nil
 		}
 		return 0, false, err

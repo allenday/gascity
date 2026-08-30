@@ -2,7 +2,11 @@
 
 package proctable
 
-import "testing"
+import (
+	"errors"
+	"syscall"
+	"testing"
+)
 
 // TestScanBySessionID_RefusesLiveProcUnderTest is the regression guard for
 // gastownhall/gascity#2839. Under `go test` the scanner must NOT enumerate the
@@ -37,5 +41,15 @@ func TestSetScanRootForTesting_InjectsFakeRoot(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("an empty fake procfs must yield zero runtimes, got %d", len(got))
+	}
+}
+
+// TestGoneProcEntryTreatsESRCHAsAProcessExit pins the /proc race observed in
+// production: a PID may exit after directory enumeration, and Linux reports
+// ESRCH while reading its environ. That is an authoritative absence, not an
+// incomplete scan that should block every new session.
+func TestGoneProcEntryTreatsESRCHAsAProcessExit(t *testing.T) {
+	if !isGoneOrUnreadableProcEntry(errors.Join(syscall.ESRCH, errors.New("read environ"))) {
+		t.Fatal("ESRCH must be treated as a vanished /proc entry")
 	}
 }
