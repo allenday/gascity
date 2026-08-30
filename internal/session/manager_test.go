@@ -511,17 +511,15 @@ func TestCreateKillsUntrackedOrphanFromSameCityBeforeStartWithNormalizedPath(t *
 }
 
 // TestCreateRefusesStartWhenOrphanNotConfirmedDead pins the fail-closed
-// contract: when an untracked same-session orphan cannot be confirmed dead
-// (TerminateRuntime errors — e.g. it survived SIGKILL), Create must refuse to
-// start a replacement rather than race the survivor for the same work bead. A
-// concurrent scan error is logged and treated as fail-closed, so the orphan the
-// scan did surface is still targeted. No Start is attempted.
+// contract: when the process-table scan is incomplete, Create must refuse to
+// start a replacement rather than race a survivor for the same work bead. Its
+// partial result cannot prove an untracked runtime is orphaned, so no runtime
+// is terminated. No Start is attempted.
 func TestCreateRefusesStartWhenOrphanNotConfirmedDead(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &orphanScanProvider{
 		Fake:         runtime.NewFake(),
 		findErr:      errors.New("partial scan failed"),
-		terminateErr: errors.New("terminate failed"),
 		results: []runtime.LiveRuntime{{
 			PID:       1234,
 			IsTracked: false,
@@ -541,11 +539,8 @@ func TestCreateRefusesStartWhenOrphanNotConfirmedDead(t *testing.T) {
 			t.Fatalf("Start was attempted despite unconfirmed orphan; events = %v", sp.events)
 		}
 	}
-	want := []string{"find:", "terminate:"}
-	for i, prefix := range want {
-		if i >= len(sp.events) || !strings.HasPrefix(sp.events[i], prefix) {
-			t.Fatalf("events = %v, want prefixes %v", sp.events, want)
-		}
+	if got := sp.events; len(got) != 1 || !strings.HasPrefix(got[0], "find:") {
+		t.Fatalf("events = %v, want only a process-table scan", got)
 	}
 }
 
